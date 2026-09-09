@@ -68,17 +68,22 @@ cmd: cmd /c "set PORT=%PORT% & llama-server.exe ..."
 - **Proxy**: the request is reverse-proxied to the model's `proxy` URL and
   streamed back.
 - **Idle unload**: if no requests arrive for `globalTTL` seconds, the model
-  process is killed.
+  is stopped (on Unix: SIGTERM to its whole process group, escalating to
+  SIGKILL after a 10s grace; on Windows: the direct child is killed).
 - **Output**: the model process's stdout/stderr go to llama-swappy's
   stdout; llama-swappy's own logs go to stderr.
 - **Shutdown**: Ctrl+C stops the server and unloads any loaded model.
 
 ## Limitations
 
-- Unloading kills only the direct child process. If your `cmd` is a shell
-  script that spawns the server as a grandchild, make sure the script
-  forwards termination (e.g. trap) or use `exec`. The unload wait is
-  bounded (15s), so this cannot hang the process.
+- On Unix, unloading sends SIGTERM to the model's whole process group
+  (the wrapper script and everything it spawns), waiting 10s before
+  escalating to SIGKILL — so a plain wrapper script is stopped
+  completely, and the server gets its clean-exit path on SIGTERM. On
+  Windows only the direct child is killed; use a direct executable
+  invocation there. A grandchild that leaves the process group (e.g.
+  via `setsid` or daemonizing) is not stopped. The unload wait is
+  bounded (30s), so this cannot hang the process.
 - Requests arrive at the proxy URL, not the model port; port conflicts with
   other services on `startPort` are not detected ahead of time.
 - If an upstream failure happens after the response has already started
@@ -93,5 +98,6 @@ go test ./...
 
 Besides unit tests, the suite includes integration tests that build a
 fake "llama-server" with the local go toolchain and exercise the real
-process spawning, stdout capture, idle unload, and the full
-config -> proxy pipeline over a real HTTP listener.
+process spawning, stdout capture, idle unload — including a wrapper
+script that spawns the server as a grandchild (Unix only) — and the
+full config -> proxy pipeline over a real HTTP listener.

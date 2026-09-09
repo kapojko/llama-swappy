@@ -48,10 +48,14 @@ request restarts it.
   arguments ["cmd", "/c", "set PORT=%PORT% & server ..."]; on Windows
   exec re-quotes each argument for CreateProcess, restoring the original
   command line.
-- Unloading kills the direct child process only; killing grandchildren is
-  intentionally out of scope (see README limitations). `Wait` is bounded
-  by `WaitDelay` (15s), so a grandchild that keeps the stdout pipe open
-  cannot hang the unload.
+- Unloading stops the model's whole process group on Unix (SIGTERM,
+  escalating to SIGKILL after a 10s grace), which covers wrapper scripts
+  that spawn the server; on Windows only the direct child is killed
+   (see README limitations). `Wait` is bounded by `WaitDelay` (30s), so a
+   process that keeps the stdout pipe open cannot hang the unload. A
+   termination exit (signal or non-zero code) is the expected outcome of
+   `Kill` and is not logged as a failure; only non-exit errors such as
+   `ErrWaitDelay` are.
 - The proxy tracks whether a response has already started streaming; an
   upstream failure after the first bytes are sent cannot rewrite the
   status code, so only a log entry is produced in that case.

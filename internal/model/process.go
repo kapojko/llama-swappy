@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -9,10 +10,9 @@ import (
 )
 
 // waitDelay bounds how long Wait waits for the child's I/O pipes to
-// close after the process exits. Without it, a grandchild process
-// (e.g. a server spawned by a shell script) that keeps the pipes open
-// would make Wait block forever.
-const waitDelay = 15 * time.Second
+// close after the process exits. Without it, a process that keeps the
+// pipes open would make Wait block forever.
+const waitDelay = 30 * time.Second
 
 // ProcessStarter starts a model by running cmd as a shell-less command
 // line. The line is split on whitespace with double quotes honored, so
@@ -35,6 +35,7 @@ func (ProcessStarter) Start(cmd string, out io.Writer) (Handle, error) {
 	c.Stdout = out
 	c.Stderr = out
 	c.WaitDelay = waitDelay
+	c.SysProcAttr = sysProcAttr()
 	if err := c.Start(); err != nil {
 		return nil, err
 	}
@@ -77,10 +78,23 @@ type procHandle struct {
 	cmd *exec.Cmd
 }
 
-func (h *procHandle) Kill() error {
-	return h.cmd.Process.Kill()
+// Wait reaps the process. Kill already reaps it, so this returns nil if
+// the process has already exited.
+func (h *procHandle) Wait() error {
+	if h.cmd.ProcessState != nil {
+		return nil
+	}
+	return h.cmd.Wait()
 }
 
-func (h *procHandle) Wait() error {
-	return h.cmd.Wait()
+// stopErr treats an exit as the expected outcome of Kill: the process is
+// gone, so a termination exit status (signal or non-zero code) is not a
+// failure. Only errors that are not an exit (e.g. ErrWaitDelay, when a
+// pipe holder outlives the group) are reported.
+func stopErr(err error) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return nil
+	}
+	return err
 }
