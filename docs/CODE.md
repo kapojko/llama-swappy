@@ -66,7 +66,7 @@ YAML with exactly three top-level keys (see `example/llama-swap-config.yaml`):
 
 - `globalTTL` — idle seconds before unload
 - `startPort` — single port reused by whichever model is active; `${PORT}`
-  in each model's `proxy` URL is substituted with it
+  in each model's `cmd` and `proxy` URL is substituted with it
 - `models` — map of model key -> `{name, cmd, proxy}`
 
 Validation is in `config.Validate`.

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -126,9 +127,11 @@ func (m *Manager) EnsureModel(key string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("model %q not found in config", key)
 	}
+	port := strconv.Itoa(m.cfg.StartPort)
 	proxyURL := def.ProxyURL(m.cfg.StartPort)
-	m.log.Info("starting model", "model", key, "cmd", def.Cmd)
-	h, err := m.starter.Start(def.Cmd, m.out)
+	cmd := strings.ReplaceAll(def.Cmd, config.PortPlaceholder, port)
+	m.log.Info("starting model", "model", key, "cmd", cmd)
+	h, err := m.starter.Start(cmd, m.out)
 	if err != nil {
 		m.log.Error("start failed", "model", key, "err", err)
 		return "", fmt.Errorf("start model %q: %w", key, err)

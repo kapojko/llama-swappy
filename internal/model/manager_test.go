@@ -37,13 +37,15 @@ func (h *fakeHandle) wasKilled() bool {
 type fakeStarter struct {
 	mu      sync.Mutex
 	handles []*fakeHandle
+	cmds    []string
 }
 
-func (s *fakeStarter) Start(_ string, _ io.Writer) (Handle, error) {
+func (s *fakeStarter) Start(cmd string, _ io.Writer) (Handle, error) {
 	h := &fakeHandle{}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.handles = append(s.handles, h)
+	s.cmds = append(s.cmds, cmd)
 	return h, nil
 }
 
@@ -76,7 +78,7 @@ func newTestManager(t *testing.T, ts *httptest.Server, ttl time.Duration, readyT
 		GlobalTTL: 900,
 		StartPort: port,
 		Models: map[string]config.Model{
-			"m1": {Name: "Model One", Cmd: "cmd1", Proxy: "http://127.0.0.1:${PORT}"},
+			"m1": {Name: "Model One", Cmd: "cmd1 ${PORT}", Proxy: "http://127.0.0.1:${PORT}"},
 			"m2": {Name: "Model Two", Cmd: "cmd2", Proxy: "http://127.0.0.1:${PORT}"},
 		},
 	}
@@ -125,6 +127,28 @@ func TestEnsureModelStarts(t *testing.T) {
 	}
 	if len(fs.handles) != before {
 		t.Errorf("handle count changed on same-model EnsureModel")
+	}
+}
+
+func TestEnsureModelSubstitutesPort(t *testing.T) {
+	ts := readyBackend()
+	defer ts.Close()
+	m, fs := newTestManager(t, ts, time.Minute, 5*time.Second)
+
+	if _, err := m.EnsureModel("m1"); err != nil {
+		t.Fatalf("EnsureModel: %v", err)
+	}
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("parse test server url: %v", err)
+	}
+	port, _ := strconv.Atoi(u.Port())
+	if len(fs.cmds) != 1 {
+		t.Fatalf("expected 1 start, got %d", len(fs.cmds))
+	}
+	want := "cmd1 " + strconv.Itoa(port)
+	if fs.cmds[0] != want {
+		t.Errorf("cmd = %q, want %q", fs.cmds[0], want)
 	}
 }
 
