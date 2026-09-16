@@ -59,6 +59,33 @@ request restarts it.
 - The proxy tracks whether a response has already started streaming; an
   upstream failure after the first bytes are sent cannot rewrite the
   status code, so only a log entry is produced in that case.
+- **Crash recovery.** Each handle owns a single *reaper*: one goroutine
+  calls `exec.Cmd.Wait` and stores the exit error in a buffered channel
+  with a mutex-cached result, so `Kill` and `Wait` can both consume the
+  exit idempotently without a double-`Wait` race. The platform `Kill`
+  variants send their signal(s), then return the reaper result instead of
+  waiting themselves.
+- The manager starts a `watch` goroutine per active model. It blocks on
+  `handle.Wait`; when the process exits and the model is still current,
+  the manager logs the unexpected exit (with its exit status), clears the
+  active model and schedules a fixed-delay auto-restart via
+  `time.AfterFunc` (default 10s, `Options.RestartDelay`). The restart
+  callback only starts the model if the manager is still open and no model
+  is loaded; any successful start cancels the pending timer, so a client
+  request during the restart window restarts immediately and the timer
+  no-ops. `stopLocked` clears the active model *before* killing, so
+  self-initiated exits (idle unload, swap, shutdown) are ignored by the
+  watcher.
+- A crash-loop cap prevents hammering a model that dies without ever
+   serving a request: each unexpected exit increments `crashLoops`
+   (reset when the exit follows a served model, i.e. one that answered a
+   2xx, and also by any explicit `EnsureModel` start, so one model's
+   unserved-crash streak cannot suppress another model's restarts); once
+   `crashLoops` exceeds `maxAutoRestarts` (3) no further auto-restart is
+   scheduled, but an explicit request always restarts the model.
+- The proxy records the response status code in its `startedWriter`;
+  after each proxied request that completed with a 2xx it calls
+  `Manager.MarkServed` so the crash-loop counter can be reset.
 
 ## Config
 

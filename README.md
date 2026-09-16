@@ -70,6 +70,12 @@ cmd: cmd /c "set PORT=%PORT% & llama-server.exe ..."
 - **Idle unload**: if no requests arrive for `globalTTL` seconds, the model
   is stopped (on Unix: SIGTERM to its whole process group, escalating to
   SIGKILL after a 10s grace; on Windows: the direct child is killed).
+- **Crash recovery**: if the model process exits unexpectedly (e.g.
+  segfault), the exit is detected, the model is cleared, and it is
+  auto-restarted after 10 seconds — or immediately on the next request in
+   the meantime. Auto-restart is suppressed after 3 consecutive crashes
+   that never served a 2xx response; any subsequent request starts the
+   model and begins a fresh crash streak.
 - **Output**: the model process's stdout/stderr go to llama-swappy's
   stdout; llama-swappy's own logs go to stderr.
 - **Shutdown**: Ctrl+C stops the server and unloads any loaded model.

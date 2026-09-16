@@ -25,8 +25,18 @@ type Handle interface {
 	Wait() error
 }
 
+// defaultRestartDelay is how long the manager waits after an unexpected
+// model exit before auto-restarting the model.
+const defaultRestartDelay = 10 * time.Second
+
+// maxAutoRestarts caps the number of consecutive auto-restarts after
+// crashes that never served a request; beyond it, only an explicit
+// request restarts the model.
+const maxAutoRestarts = 3
+
 // Options configures the Manager. Zero values fall back to sensible
-// defaults (TTL from config, 5m readiness timeout, 500ms polling).
+// defaults (TTL from config, 5m readiness timeout, 500ms polling, 10s
+// restart delay).
 type Options struct {
 	Logger       *slog.Logger
 	Out          io.Writer
@@ -34,18 +44,22 @@ type Options struct {
 	TTL          time.Duration
 	ReadyTimeout time.Duration
 	PollInterval time.Duration
+	RestartDelay time.Duration
 }
 
 // active tracks the currently loaded model. At most one model is
 // loaded at a time; a request for another model "swaps" it in.
 type active struct {
-	key      string
-	handle   Handle
-	proxyURL string
+	key       string
+	handle    Handle
+	proxyURL  string
+	startedAt time.Time
+	served    bool
 }
 
 // Manager owns the lifecycle of the single active model: starting,
-// readiness probing, idle unloading and stopping.
+// readiness probing, idle unloading, crash detection, auto-restart and
+// stopping.
 type Manager struct {
 	cfg          *config.Config
 	log          *slog.Logger
@@ -54,10 +68,13 @@ type Manager struct {
 	ttl          time.Duration
 	readyTimeout time.Duration
 	poll         time.Duration
+	restartDelay time.Duration
 
-	mu         sync.Mutex
-	cur        *active
-	lastActive time.Time
+	mu           sync.Mutex
+	cur          *active
+	lastActive   time.Time
+	crashLoops   int
+	restartTimer *time.Timer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -92,6 +109,10 @@ func New(cfg *config.Config, opts Options) *Manager {
 	if poll <= 0 {
 		poll = 500 * time.Millisecond
 	}
+	restart := opts.RestartDelay
+	if restart <= 0 {
+		restart = defaultRestartDelay
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
 		cfg:          cfg,
@@ -101,6 +122,7 @@ func New(cfg *config.Config, opts Options) *Manager {
 		ttl:          ttl,
 		readyTimeout: ready,
 		poll:         poll,
+		restartDelay: restart,
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -123,6 +145,15 @@ func (m *Manager) EnsureModel(key string) (string, error) {
 		m.log.Info("swapping out model", "model", m.cur.key, "in", key)
 		m.stopLocked()
 	}
+	// An explicit request starts a fresh crash-streak: the previous
+	// model's unserved crashes must not suppress this model's restarts.
+	m.crashLoops = 0
+	return m.startLocked(key)
+}
+
+// startLocked spawns the model for key, waits for readiness and
+// registers it as the active model. The caller must hold m.mu.
+func (m *Manager) startLocked(key string) (string, error) {
 	def, ok := m.cfg.Models[key]
 	if !ok {
 		return "", fmt.Errorf("model %q not found in config", key)
@@ -142,9 +173,14 @@ func (m *Manager) EnsureModel(key string) (string, error) {
 		m.log.Error("model not ready, unloaded", "model", key, "err", err)
 		return "", fmt.Errorf("model %q not ready: %w", key, err)
 	}
-	m.cur = &active{key: key, handle: h, proxyURL: proxyURL}
+	// Any successful start cancels a pending crash restart, so a client
+	// request during the restart window wins and the timer no-ops.
+	m.cancelRestartTimerLocked()
+	a := &active{key: key, handle: h, proxyURL: proxyURL, startedAt: time.Now()}
+	m.cur = a
 	m.lastActive = time.Now()
 	m.log.Info("model ready", "model", key, "proxy", proxyURL)
+	go m.watch(a)
 	return proxyURL, nil
 }
 
@@ -158,6 +194,16 @@ func (m *Manager) Current() string {
 	return m.cur.key
 }
 
+// MarkServed reports that the active model produced a successful (2xx)
+// response; it resets the consecutive-crash counter on its next exit.
+func (m *Manager) MarkServed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cur != nil {
+		m.cur.served = true
+	}
+}
+
 // StopAll unloads the current model, if any.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
@@ -165,9 +211,13 @@ func (m *Manager) StopAll() {
 	m.stopLocked()
 }
 
-// Close stops the idle monitor and unloads any loaded model.
+// Close stops the idle monitor, cancels any pending auto-restart and
+// unloads any loaded model.
 func (m *Manager) Close() {
 	m.cancel()
+	m.mu.Lock()
+	m.cancelRestartTimerLocked()
+	m.mu.Unlock()
 	m.StopAll()
 }
 
@@ -196,15 +246,71 @@ func (m *Manager) stopLocked() {
 	if m.cur == nil {
 		return
 	}
-	key := m.cur.key
+	a := m.cur
+	key := a.key
 	m.log.Info("stopping model", "model", key)
-	if err := m.cur.handle.Kill(); err != nil {
+	// Clear before killing so the exit watcher ignores the exit we cause
+	// (crash at the same instant as an idle unload or swap).
+	m.cur = nil
+	if err := a.handle.Kill(); err != nil {
 		m.log.Warn("kill model failed", "model", key, "err", err)
 	}
-	if err := m.cur.handle.Wait(); err != nil {
+	if err := a.handle.Wait(); err != nil {
 		m.log.Warn("wait model failed", "model", key, "err", err)
 	}
+}
+
+// watch observes the model process. On an unexpected exit it clears the
+// active model and schedules a fixed-delay auto-restart, unless the
+// crash-loop cap has been reached.
+func (m *Manager) watch(a *active) {
+	err := a.handle.Wait()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cur != a {
+		// Self-initiated exit (idle unload, swap, shutdown) or an exit
+		// already handled; ignore.
+		return
+	}
+	m.log.Error("model exited unexpectedly", "model", a.key, "uptime", time.Since(a.startedAt), "err", err)
 	m.cur = nil
+	if a.served {
+		m.crashLoops = 0
+	}
+	m.crashLoops++
+	if m.crashLoops > maxAutoRestarts {
+		m.log.Warn("auto-restart suppressed: consecutive crashes without a served request", "model", a.key, "crashes", m.crashLoops)
+		return
+	}
+	m.scheduleRestartLocked(a.key)
+}
+
+// scheduleRestartLocked arms the fixed-delay auto-restart for key. The
+// caller must hold m.mu.
+func (m *Manager) scheduleRestartLocked(key string) {
+	if m.restartTimer != nil {
+		m.restartTimer.Stop()
+	}
+	m.restartTimer = time.AfterFunc(m.restartDelay, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.ctx.Err() != nil || m.cur != nil {
+			return
+		}
+		m.log.Info("restarting model after crash", "model", key)
+		if _, err := m.startLocked(key); err != nil {
+			m.log.Error("auto-restart failed", "model", key, "err", err)
+		}
+	})
+}
+
+// cancelRestartTimerLocked stops any pending auto-restart. The caller
+// must hold m.mu.
+func (m *Manager) cancelRestartTimerLocked() {
+	if m.restartTimer != nil {
+		m.restartTimer.Stop()
+		m.restartTimer = nil
+	}
 }
 
 // waitReady polls proxyURL + "/health" until it answers 2xx/3xx or the

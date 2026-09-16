@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,7 +40,21 @@ func (ProcessStarter) Start(cmd string, out io.Writer) (Handle, error) {
 	if err := c.Start(); err != nil {
 		return nil, err
 	}
-	return &procHandle{cmd: c}, nil
+	h := &procHandle{
+		cmd:      c,
+		done:     make(chan error, 1),
+		finished: make(chan struct{}),
+	}
+	// The single reaper: exactly one goroutine calls exec.Cmd.Wait, so
+	// the exit error is produced once and consumed idempotently by both
+	// Kill and Wait. finished is a pure observation channel (closing it
+	// never consumes the buffered error).
+	go func() {
+		err := c.Wait()
+		h.done <- err
+		close(h.finished)
+	}()
+	return h, nil
 }
 
 // splitCommandLine splits a command line on whitespace, treating double
@@ -75,16 +90,33 @@ func splitCommandLine(s string) ([]string, error) {
 }
 
 type procHandle struct {
-	cmd *exec.Cmd
+	cmd      *exec.Cmd
+	done     chan error
+	finished chan struct{}
+
+	mu     sync.Mutex
+	res    error
+	reaped bool
 }
 
-// Wait reaps the process. Kill already reaps it, so this returns nil if
-// the process has already exited.
-func (h *procHandle) Wait() error {
-	if h.cmd.ProcessState != nil {
-		return nil
+// result consumes the reaper exactly once and caches the exit error, so
+// Wait and Kill can be called from multiple goroutines without ever
+// invoking exec.Cmd.Wait a second time.
+func (h *procHandle) result() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reaped {
+		return h.res
 	}
-	return h.cmd.Wait()
+	h.res = <-h.done
+	h.reaped = true
+	return h.res
+}
+
+// Wait blocks until the process exits and returns its exit error;
+// subsequent calls return the cached result.
+func (h *procHandle) Wait() error {
+	return h.result()
 }
 
 // stopErr treats an exit as the expected outcome of Kill: the process is

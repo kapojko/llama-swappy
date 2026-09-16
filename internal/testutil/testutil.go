@@ -14,7 +14,8 @@ import (
 
 // fakeserverSrc is a minimal HTTP server that stands in for llama-server:
 // it listens on the given port, prints FAKE-READY when listening, serves
-// /health with 200, and echoes the request body on any other path.
+// /health with 200, and echoes the request body on any other path. With
+// -crash-after <duration> it exits with status 1 after that duration.
 const fakeserverSrc = `package main
 
 import (
@@ -24,10 +25,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 )
 
 func main() {
 	port := flag.String("port", "", "listen port")
+	crashAfter := flag.Duration("crash-after", 0, "exit with status 1 after this duration")
 	flag.Parse()
 	ln, err := net.Listen("tcp", "127.0.0.1:" + *port)
 	if err != nil {
@@ -36,6 +39,12 @@ func main() {
 	}
 	fmt.Println("FAKE-READY")
 	_ = os.Stdout.Sync()
+	if *crashAfter > 0 {
+		go func() {
+			time.Sleep(*crashAfter)
+			os.Exit(1)
+		}()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

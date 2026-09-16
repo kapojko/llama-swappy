@@ -14,12 +14,11 @@ func sysProcAttr() *syscall.SysProcAttr {
 	return nil
 }
 
-// Kill terminates the direct child process and reaps it, so a
-// subsequent Wait returns nil.
+// Kill terminates the direct child process and returns the reaper
+// result, so a subsequent Wait returns the cached exit error.
 func (h *procHandle) Kill() error {
-	err := h.cmd.Process.Kill()
-	if err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := h.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
 	}
-	return stopErr(h.cmd.Wait())
+	return stopErr(h.result())
 }

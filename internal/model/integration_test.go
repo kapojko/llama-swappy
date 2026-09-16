@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
@@ -69,6 +70,57 @@ func TestRealProcessLifecycle(t *testing.T) {
 	if _, err := m.EnsureModel("m1"); err != nil {
 		t.Fatalf("restart after idle unload: %v", err)
 	}
+}
+
+// TestCrashAutoRestartIntegration exercises crash recovery with the real
+// ProcessStarter: the fake model exits on its own, the manager detects
+// the unexpected exit and the auto-restart brings /health back.
+func TestCrashAutoRestartIntegration(t *testing.T) {
+	bin := testutil.BuildFakeServer(t)
+	port := testutil.FreePort(t)
+	cfg := &config.Config{
+		GlobalTTL: 900,
+		StartPort: mustAtoi(t, port),
+		Models: map[string]config.Model{
+			"m1": {
+				Name:  "M1",
+				Cmd:   fmt.Sprintf(`"%s" -port %s -crash-after 1s`, bin, port),
+				Proxy: "http://127.0.0.1:${PORT}",
+			},
+		},
+	}
+	var out bytes.Buffer
+	m := New(cfg, Options{
+		Logger:       quietLogger(),
+		Out:          &out,
+		Starter:      ProcessStarter{},
+		TTL:          time.Hour,
+		ReadyTimeout: 30 * time.Second,
+		PollInterval: 100 * time.Millisecond,
+		RestartDelay: 500 * time.Millisecond,
+	})
+	defer m.Close()
+
+	u, err := m.EnsureModel("m1")
+	if err != nil {
+		t.Fatalf("EnsureModel: %v", err)
+	}
+
+	// The fake server exits after 1s; the manager must clear it and the
+	// auto-restart must bring /health back within the deadline.
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(u + "/health")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("/health not restored after crash; Current=%q, log: %s", m.Current(), out.String())
 }
 
 func mustAtoi(t *testing.T, s string) int {

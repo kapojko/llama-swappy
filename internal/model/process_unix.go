@@ -19,23 +19,22 @@ func sysProcAttr() *syscall.SysProcAttr {
 }
 
 // Kill sends SIGTERM to the model's entire process group and waits up
-// to termGrace for it to exit, escalating to SIGKILL on the group if
-// anything survives. The process is reaped before returning, so a
-// subsequent Wait returns nil.
+// to termGrace for the reaper to report the exit, escalating to SIGKILL
+// on the group if anything survives. It returns the reaper result, so a
+// subsequent Wait returns the cached exit error.
 func (h *procHandle) Kill() error {
 	pid := h.cmd.Process.Pid
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
 		return err
 	}
-	done := make(chan error, 1)
-	go func() { done <- h.cmd.Wait() }()
 	select {
-	case err := <-done:
-		return stopErr(err)
+	case <-h.finished:
+		return stopErr(h.result())
 	case <-time.After(termGrace):
 		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 			return err
 		}
-		return stopErr(<-done)
+		<-h.finished
+		return stopErr(h.result())
 	}
 }

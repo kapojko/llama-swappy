@@ -17,10 +17,39 @@ import (
 	"llama-swappy/internal/model"
 )
 
-type fakeHandle struct{ killed bool }
+// fakeHandle mimics a running process: it only "exits" when Kill is
+// called, and Wait returns the cached exit error idempotently.
+type fakeHandle struct {
+	mu     sync.Mutex
+	killed bool
+	done   chan error
+	res    error
+	reaped bool
+}
 
-func (h *fakeHandle) Kill() error { h.killed = true; return nil }
-func (h *fakeHandle) Wait() error { return nil }
+// Kill signals a clean exit first (without the lock, since Wait may be
+// blocked on the channel while holding it), then records the kill.
+func (h *fakeHandle) Kill() error {
+	select {
+	case h.done <- nil:
+	default:
+	}
+	h.mu.Lock()
+	h.killed = true
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *fakeHandle) Wait() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reaped {
+		return h.res
+	}
+	h.res = <-h.done
+	h.reaped = true
+	return h.res
+}
 
 type fakeStarter struct {
 	mu      sync.Mutex
@@ -28,7 +57,7 @@ type fakeStarter struct {
 }
 
 func (s *fakeStarter) Start(_ string, _ io.Writer) (model.Handle, error) {
-	h := &fakeHandle{}
+	h := &fakeHandle{done: make(chan error, 1)}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.handles = append(s.handles, h)

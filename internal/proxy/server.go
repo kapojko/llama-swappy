@@ -92,23 +92,32 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	s.log.Info("proxying request", "model", req.Model, "path", r.URL.Path)
 	rp.ServeHTTP(sw, r)
+	if sw.started && sw.code < 300 {
+		s.mgr.MarkServed()
+	}
 }
 
-// startedWriter tracks whether any part of the response has been sent,
-// so an error handler can tell whether it is still allowed to set the
-// status code.
+// startedWriter tracks whether any part of the response has been sent
+// (and with which status code), so an error handler can tell whether it
+// is still allowed to set the status code and the manager can tell
+// whether a request was served.
 type startedWriter struct {
 	http.ResponseWriter
 	started bool
+	code    int
 }
 
 func (w *startedWriter) WriteHeader(code int) {
 	w.started = true
+	w.code = code
 	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w *startedWriter) Write(b []byte) (int, error) {
 	w.started = true
+	if w.code == 0 {
+		w.code = http.StatusOK
+	}
 	return w.ResponseWriter.Write(b)
 }
 
