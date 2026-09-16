@@ -101,7 +101,8 @@ Validation is in `config.Validate`.
 ## Package layout
 
 - `main.go` — entrypoint
-- `cmd/root.go` — cobra CLI: `--config` (required), `--listen`
+- `cmd/root.go` — cobra CLI: `--config` (required), `--listen`, `--version`
+- `cmd/version.go` — version constant (`Version`)
 - `internal/config` — YAML load/validate
 - `internal/model` — model lifecycle (start, readiness, idle, stop)
 - `internal/proxy` — OpenAI listener + reverse proxy

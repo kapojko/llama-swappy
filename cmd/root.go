@@ -25,8 +25,9 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "llama-swappy",
-	Short: "llama-swappy - swaps llama.cpp models behind an OpenAI-compatible proxy",
+	Use:     "llama-swappy",
+	Short:   "llama-swappy - swaps llama.cpp models behind an OpenAI-compatible proxy",
+	Version: Version,
 	Long: "llama-swappy listens for OpenAI-compatible requests, starts the requested " +
 		"model on demand, proxies the request to it, and unloads the model after a " +
 		"period of inactivity. Only one model is loaded at a time.",
