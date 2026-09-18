@@ -49,9 +49,6 @@ func TestRealProcessLifecycle(t *testing.T) {
 	if want := "http://127.0.0.1:" + port; u != want {
 		t.Fatalf("proxy URL = %q, want %q", u, want)
 	}
-	if !strings.Contains(out.String(), "FAKE-READY") {
-		t.Errorf("captured stdout %q does not contain FAKE-READY", out.String())
-	}
 
 	deadline := time.Now().Add(5 * time.Second)
 	for m.Current() != "" && time.Now().Before(deadline) {
@@ -69,6 +66,12 @@ func TestRealProcessLifecycle(t *testing.T) {
 
 	if _, err := m.EnsureModel("m1"); err != nil {
 		t.Fatalf("restart after idle unload: %v", err)
+	}
+	// Read the captured stdout only after Close: the pipe-copy goroutines
+	// are done once the last handle's Wait has returned.
+	m.Close()
+	if !strings.Contains(out.String(), "FAKE-READY") {
+		t.Errorf("captured stdout %q does not contain FAKE-READY", out.String())
 	}
 }
 

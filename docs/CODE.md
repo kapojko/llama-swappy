@@ -33,7 +33,11 @@ ReverseProxy streams the response back to the client
 
 The manager runs a background ticker. When the active model has had no
 requests for `globalTTL` seconds, it is killed and unregistered. Any later
-request restarts it.
+request restarts it. The idle time is counted from the last *completed*
+successful response (`MarkServed`), not from the request start alone, so a
+model that just finished a response is not unloaded immediately after. A
+single request that runs longer than the TTL can still be unloaded
+mid-stream, since the timer is only refreshed when a response completes.
 
 ## Process model
 
@@ -52,10 +56,11 @@ request restarts it.
   escalating to SIGKILL after a 10s grace), which covers wrapper scripts
   that spawn the server; on Windows only the direct child is killed
    (see README limitations). `Wait` is bounded by `WaitDelay` (30s), so a
-   process that keeps the stdout pipe open cannot hang the unload. A
-   termination exit (signal or non-zero code) is the expected outcome of
-   `Kill` and is not logged as a failure; only non-exit errors such as
-   `ErrWaitDelay` are.
+    process that keeps the stdout pipe open cannot hang the unload. A
+    termination exit (signal or non-zero code) is the expected outcome of
+    stopping the model: both the `Kill` result and the `Wait` result in
+    `stopLocked` run through `stopErr`, so such exits are not logged as
+    failures; only non-exit errors such as `ErrWaitDelay` are.
 - The proxy tracks whether a response has already started streaming; an
   upstream failure after the first bytes are sent cannot rewrite the
   status code, so only a log entry is produced in that case.
@@ -85,7 +90,10 @@ request restarts it.
    scheduled, but an explicit request always restarts the model.
 - The proxy records the response status code in its `startedWriter`;
   after each proxied request that completed with a 2xx it calls
-  `Manager.MarkServed` so the crash-loop counter can be reset.
+  `Manager.MarkServed(key)` with the model key. `MarkServed` resets the
+  crash-loop counter and refreshes `lastActive` (see Idle unloading); it
+  is a no-op if key is no longer the active model, e.g. when an in-flight
+  response of a swapped-out model completes after the swap.
 
 ## Config
 

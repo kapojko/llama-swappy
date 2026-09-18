@@ -93,7 +93,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("proxying request", "model", req.Model, "path", r.URL.Path)
 	rp.ServeHTTP(sw, r)
 	if sw.started && sw.code < 300 {
-		s.mgr.MarkServed()
+		s.mgr.MarkServed(req.Model)
 	}
 }
 

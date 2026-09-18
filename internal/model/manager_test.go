@@ -1,13 +1,18 @@
 package model
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,19 +22,21 @@ import (
 
 // fakeHandle mimics a running process: Wait blocks until the process
 // "exits" (Kill sends a clean exit, crash sends an unexpected one) and
-// returns the cached exit error idempotently.
+// returns the cached exit error idempotently. Kill exits with exitErr
+// if it is set, to simulate e.g. a real signal-terminated exit.
 type fakeHandle struct {
-	mu     sync.Mutex
-	killed bool
-	done   chan error
-	res    error
-	reaped bool
+	mu      sync.Mutex
+	killed  bool
+	exitErr error
+	done    chan error
+	res     error
+	reaped  bool
 }
 
 // Kill signals a clean exit first (without the lock, since Wait may be
 // blocked on the channel while holding it), then records the kill.
 func (h *fakeHandle) Kill() error {
-	h.signalExit(nil)
+	h.signalExit(h.exitErr)
 	h.mu.Lock()
 	h.killed = true
 	h.mu.Unlock()
@@ -89,13 +96,88 @@ func (s *fakeStarter) last() *fakeHandle {
 	return s.handles[len(s.handles)-1]
 }
 
+// count returns the number of started handles under the lock.
+func (s *fakeStarter) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.handles)
+}
+
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// recordLogger captures every record it receives, so tests can assert
+// on log output (e.g. that an expected exit is not logged as a warning).
+type recordLogger struct {
+	mu  sync.Mutex
+	rec []slog.Record
+}
+
+func (r *recordLogger) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (r *recordLogger) Handle(_ context.Context, rec slog.Record) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rec = append(r.rec, rec.Clone())
+	return nil
+}
+
+func (r *recordLogger) WithAttrs([]slog.Attr) slog.Handler { return r }
+
+func (r *recordLogger) WithGroup(string) slog.Handler { return r }
+
+func (r *recordLogger) warns() []slog.Record {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []slog.Record
+	for _, rec := range r.rec {
+		if rec.Level == slog.LevelWarn {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// dump renders the captured records as text, for failure messages.
+func (r *recordLogger) dump() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var b strings.Builder
+	for _, rec := range r.rec {
+		_ = slog.NewTextHandler(&b, nil).Handle(context.Background(), rec)
+	}
+	return b.String()
+}
+
+// realExitError runs a process that terminates abnormally (non-zero
+// exit code on Windows, SIGTERM on Unix) and returns the genuine
+// *exec.ExitError such an exit produces.
+func realExitError(t *testing.T) error {
+	t.Helper()
+	var c *exec.Cmd
+	if runtime.GOOS == "windows" {
+		c = exec.Command("cmd", "/c", "exit 3")
+	} else {
+		c = exec.Command("sh", "-c", "kill -TERM $$")
+	}
+	err := c.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
+	}
+	return err
 }
 
 // newTestManager wires a manager whose single model port is the port of
 // ts, an httptest server standing in for the real model.
 func newTestManager(t *testing.T, ts *httptest.Server, ttl time.Duration, readyTimeout time.Duration, restartDelay time.Duration) (*Manager, *fakeStarter) {
+	t.Helper()
+	return newTestManagerWithLogger(t, ts, quietLogger(), ttl, readyTimeout, restartDelay)
+}
+
+// newTestManagerWithLogger is newTestManager with a custom logger.
+func newTestManagerWithLogger(t *testing.T, ts *httptest.Server, log *slog.Logger, ttl time.Duration, readyTimeout time.Duration, restartDelay time.Duration) (*Manager, *fakeStarter) {
 	t.Helper()
 	u, err := url.Parse(ts.URL)
 	if err != nil {
@@ -115,7 +197,7 @@ func newTestManager(t *testing.T, ts *httptest.Server, ttl time.Duration, readyT
 	}
 	fs := &fakeStarter{}
 	m := New(cfg, Options{
-		Logger:       quietLogger(),
+		Logger:       log,
 		Out:          io.Discard,
 		Starter:      fs,
 		TTL:          ttl,
@@ -165,11 +247,11 @@ func TestEnsureModelStarts(t *testing.T) {
 	}
 
 	// Second call for the same model must not restart it.
-	before := len(fs.handles)
+	before := fs.count()
 	if _, err := m.EnsureModel("m1"); err != nil {
 		t.Fatalf("second EnsureModel: %v", err)
 	}
-	if len(fs.handles) != before {
+	if fs.count() != before {
 		t.Errorf("handle count changed on same-model EnsureModel")
 	}
 }
@@ -241,7 +323,7 @@ func TestIdleUnload(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if m.Current() != "" {
-		t.Fatalf("model still loaded after idle TTL; handles: %d", len(fs.handles))
+		t.Fatalf("model still loaded after idle TTL; handles: %d", fs.count())
 	}
 	if h := fs.last(); h == nil || !h.wasKilled() {
 		t.Error("handle should have been killed by idle unload")
@@ -292,15 +374,15 @@ func TestCrashAutoRestart(t *testing.T) {
 	if _, err := m.EnsureModel("m1"); err != nil {
 		t.Fatalf("EnsureModel: %v", err)
 	}
-	if len(fs.handles) != 1 {
-		t.Fatalf("handles = %d, want 1", len(fs.handles))
+	if fs.count() != 1 {
+		t.Fatalf("handles = %d, want 1", fs.count())
 	}
 
 	fs.last().crash()
 	waitForCurrent(t, m, "")
 	waitForCurrent(t, m, "m1")
-	if len(fs.handles) != 2 {
-		t.Errorf("handles = %d, want 2 after auto-restart", len(fs.handles))
+	if fs.count() != 2 {
+		t.Errorf("handles = %d, want 2 after auto-restart", fs.count())
 	}
 }
 
@@ -320,12 +402,12 @@ func TestCrashThenRequestNoDoubleStart(t *testing.T) {
 	if _, err := m.EnsureModel("m1"); err != nil {
 		t.Fatalf("EnsureModel after crash: %v", err)
 	}
-	if len(fs.handles) != 2 {
-		t.Fatalf("handles = %d, want 2", len(fs.handles))
+	if fs.count() != 2 {
+		t.Fatalf("handles = %d, want 2", fs.count())
 	}
 	time.Sleep(400 * time.Millisecond)
-	if len(fs.handles) != 2 {
-		t.Errorf("timer restarted after manual start: handles = %d, want 2", len(fs.handles))
+	if fs.count() != 2 {
+		t.Errorf("timer restarted after manual start: handles = %d, want 2", fs.count())
 	}
 	if m.Current() != "m1" {
 		t.Errorf("Current = %q, want m1", m.Current())
@@ -345,8 +427,8 @@ func TestCrashNoRestartAfterClose(t *testing.T) {
 
 	m.Close()
 	time.Sleep(400 * time.Millisecond)
-	if len(fs.handles) != 1 {
-		t.Errorf("handles = %d, want 1 (no restart after Close)", len(fs.handles))
+	if fs.count() != 1 {
+		t.Errorf("handles = %d, want 1 (no restart after Close)", fs.count())
 	}
 }
 
@@ -363,8 +445,8 @@ func TestCrashLoopCap(t *testing.T) {
 		waitForCurrent(t, m, "")
 		waitForCurrent(t, m, "m1")
 	}
-	if len(fs.handles) != maxAutoRestarts+1 {
-		t.Fatalf("handles = %d, want %d", len(fs.handles), maxAutoRestarts+1)
+	if fs.count() != maxAutoRestarts+1 {
+		t.Fatalf("handles = %d, want %d", fs.count(), maxAutoRestarts+1)
 	}
 
 	// The next unserved crash exceeds the cap: no auto-restart.
@@ -379,8 +461,8 @@ func TestCrashLoopCap(t *testing.T) {
 	if _, err := m.EnsureModel("m1"); err != nil {
 		t.Fatalf("manual EnsureModel after cap: %v", err)
 	}
-	if len(fs.handles) != maxAutoRestarts+2 {
-		t.Errorf("handles = %d, want %d", len(fs.handles), maxAutoRestarts+2)
+	if fs.count() != maxAutoRestarts+2 {
+		t.Errorf("handles = %d, want %d", fs.count(), maxAutoRestarts+2)
 	}
 }
 
@@ -414,14 +496,14 @@ func TestExplicitStartResetsCrashLoop(t *testing.T) {
 	if _, err := m.EnsureModel("m2"); err != nil {
 		t.Fatalf("EnsureModel(m2): %v", err)
 	}
-	if len(fs.handles) != maxAutoRestarts+2 {
-		t.Fatalf("handles = %d, want %d", len(fs.handles), maxAutoRestarts+2)
+	if fs.count() != maxAutoRestarts+2 {
+		t.Fatalf("handles = %d, want %d", fs.count(), maxAutoRestarts+2)
 	}
 	fs.last().crash()
 	waitForCurrent(t, m, "")
 	waitForCurrent(t, m, "m2")
-	if len(fs.handles) != maxAutoRestarts+3 {
-		t.Errorf("handles = %d, want %d", len(fs.handles), maxAutoRestarts+3)
+	if fs.count() != maxAutoRestarts+3 {
+		t.Errorf("handles = %d, want %d", fs.count(), maxAutoRestarts+3)
 	}
 }
 
@@ -440,11 +522,118 @@ func TestServedCrashResetsLoop(t *testing.T) {
 	}
 	// Without the reset the next crash would be the (maxAutoRestarts+1)th
 	// unserved one and auto-restart would be suppressed.
-	m.MarkServed()
+	m.MarkServed("m1")
 	fs.last().crash()
 	waitForCurrent(t, m, "")
 	waitForCurrent(t, m, "m1")
-	if len(fs.handles) != maxAutoRestarts+2 {
-		t.Errorf("handles = %d, want %d", len(fs.handles), maxAutoRestarts+2)
+	if fs.count() != maxAutoRestarts+2 {
+		t.Errorf("handles = %d, want %d", fs.count(), maxAutoRestarts+2)
 	}
 }
+
+// TestStopSignalExitNoWarn verifies that a graceful stop whose process
+// exits with a termination status (signal, non-zero code) is not logged
+// as a "wait model failed" warning: that exit is the expected outcome
+// of the stop.
+func TestStopSignalExitNoWarn(t *testing.T) {
+	ts := readyBackend()
+	defer ts.Close()
+	rec := &recordLogger{}
+	m, fs := newTestManagerWithLogger(t, ts, slog.New(rec), time.Minute, 5*time.Second, time.Second)
+
+	if _, err := m.EnsureModel("m1"); err != nil {
+		t.Fatalf("EnsureModel: %v", err)
+	}
+	fs.last().exitErr = realExitError(t)
+
+	m.StopAll()
+
+	if m.Current() != "" {
+		t.Errorf("Current = %q, want empty after StopAll", m.Current())
+	}
+	if warns := rec.warns(); len(warns) != 0 {
+		t.Errorf("stop logged %d warning(s), want 0; log: %s", len(warns), rec.dump())
+	}
+}
+
+// TestStopNonExitErrorWarns verifies that a wait error that is not a
+// process exit (e.g. a pipe that outlives the process) is still
+// reported as a warning.
+func TestStopNonExitErrorWarns(t *testing.T) {
+	ts := readyBackend()
+	defer ts.Close()
+	rec := &recordLogger{}
+	m, fs := newTestManagerWithLogger(t, ts, slog.New(rec), time.Minute, 5*time.Second, time.Second)
+
+	if _, err := m.EnsureModel("m1"); err != nil {
+		t.Fatalf("EnsureModel: %v", err)
+	}
+	fs.last().exitErr = errors.New("stdout pipe stuck")
+
+	m.StopAll()
+
+	if len(rec.warns()) == 0 {
+		t.Errorf("expected a warning for a non-exit wait error; log: %s", rec.dump())
+	}
+}
+
+// TestMarkServedRefreshesIdleTTL verifies that the idle timer is counted
+// from the last completed response: a model started long ago but which
+// just served a request is not unloaded, and is unloaded TTL after the
+// response.
+func TestMarkServedRefreshesIdleTTL(t *testing.T) {
+	ts := readyBackend()
+	defer ts.Close()
+	m, _ := newTestManager(t, ts, 150*time.Millisecond, 5*time.Second, time.Second)
+
+	if _, err := m.EnsureModel("m1"); err != nil {
+		t.Fatalf("EnsureModel: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	m.MarkServed("m1")
+
+	// More than TTL has passed since the start, but less than TTL since
+	// the served response: the model must still be loaded.
+	time.Sleep(100 * time.Millisecond)
+	if m.Current() != "m1" {
+		t.Fatal("model unloaded although a response completed within the TTL")
+	}
+
+	// Then it must be unloaded TTL after the refresh.
+	deadline := time.Now().Add(3 * time.Second)
+	for m.Current() != "" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if m.Current() != "" {
+		t.Fatal("model still loaded long after the refreshed idle TTL")
+	}
+}
+
+// TestMarkServedOtherModel is a no-op: a 2xx response that completes
+// after its model has been swapped out must not refresh the idle timer
+// of the model that replaced it.
+func TestMarkServedOtherModel(t *testing.T) {
+	ts := readyBackend()
+	defer ts.Close()
+	m, _ := newTestManager(t, ts, 150*time.Millisecond, 5*time.Second, time.Second)
+
+	if _, err := m.EnsureModel("m1"); err != nil {
+		t.Fatalf("EnsureModel: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	m.MarkServed("m2")
+
+	// The timer was not refreshed: the model is unloaded by the
+	// original TTL since the start, i.e. within ~70ms more. If the
+	// timer had been (wrongly) refreshed it would survive ~150ms more,
+	// so a tight deadline distinguishes the two.
+	deadline := time.Now().Add(110 * time.Millisecond)
+	for m.Current() != "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if m.Current() != "" {
+		t.Fatal("MarkServed for another model must not refresh the idle TTL")
+	}
+}
+
+

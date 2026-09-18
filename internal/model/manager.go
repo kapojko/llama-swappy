@@ -194,13 +194,21 @@ func (m *Manager) Current() string {
 	return m.cur.key
 }
 
-// MarkServed reports that the active model produced a successful (2xx)
-// response; it resets the consecutive-crash counter on its next exit.
-func (m *Manager) MarkServed() {
+// MarkServed reports that the model key produced a successful (2xx)
+// response. It resets the consecutive-crash counter on the model's next
+// exit and refreshes lastActive, so the idle TTL is counted from the
+// last completed response (or the request start, whichever is later)
+// instead of the request start alone. It is a no-op if key is no longer
+// the active model (e.g. it was swapped out while the response was
+// still streaming). Note: a single request that runs longer than the
+// TTL can still be unloaded mid-stream, since the timer is only
+// refreshed when a response completes.
+func (m *Manager) MarkServed(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.cur != nil {
+	if m.cur != nil && m.cur.key == key {
 		m.cur.served = true
+		m.lastActive = time.Now()
 	}
 }
 
@@ -255,7 +263,9 @@ func (m *Manager) stopLocked() {
 	if err := a.handle.Kill(); err != nil {
 		m.log.Warn("kill model failed", "model", key, "err", err)
 	}
-	if err := a.handle.Wait(); err != nil {
+	// A termination exit (signal or non-zero code) is the expected
+	// outcome of the stop, so only non-exit errors are reported.
+	if err := stopErr(a.handle.Wait()); err != nil {
 		m.log.Warn("wait model failed", "model", key, "err", err)
 	}
 }

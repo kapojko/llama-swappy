@@ -64,6 +64,13 @@ func (s *fakeStarter) Start(_ string, _ io.Writer) (model.Handle, error) {
 	return h, nil
 }
 
+// count returns the number of started handles under the lock.
+func (s *fakeStarter) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.handles)
+}
+
 // backend mimics a llama-server: /health returns 200, other paths echo
 // the request body.
 func backend(t *testing.T) *httptest.Server {
@@ -79,7 +86,7 @@ func backend(t *testing.T) *httptest.Server {
 	}))
 }
 
-func newTestServer(t *testing.T, backend *httptest.Server) (*Server, *model.Manager, *fakeStarter) {
+func newTestServer(t *testing.T, backend *httptest.Server, ttl time.Duration) (*Server, *model.Manager, *fakeStarter) {
 	t.Helper()
 	u, err := url.Parse(backend.URL)
 	if err != nil {
@@ -103,7 +110,7 @@ func newTestServer(t *testing.T, backend *httptest.Server) (*Server, *model.Mana
 		Logger:       log,
 		Out:          io.Discard,
 		Starter:      fs,
-		TTL:          time.Minute,
+		TTL:          ttl,
 		ReadyTimeout: 5 * time.Second,
 		PollInterval: 20 * time.Millisecond,
 	})
@@ -123,7 +130,7 @@ func post(t *testing.T, srv *httptest.Server, payload string) *http.Response {
 func TestProxyRoundsTrip(t *testing.T) {
 	be := backend(t)
 	defer be.Close()
-	srv, mgr, fs := newTestServer(t, be)
+	srv, mgr, fs := newTestServer(t, be, time.Minute)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -141,15 +148,15 @@ func TestProxyRoundsTrip(t *testing.T) {
 	if mgr.Current() != "m1" {
 		t.Errorf("Current = %q, want m1", mgr.Current())
 	}
-	if len(fs.handles) != 1 {
-		t.Errorf("handles = %d, want 1", len(fs.handles))
+	if fs.count() != 1 {
+		t.Errorf("handles = %d, want 1", fs.count())
 	}
 }
 
 func TestProxyUnknownModel(t *testing.T) {
 	be := backend(t)
 	defer be.Close()
-	srv, _, _ := newTestServer(t, be)
+	srv, _, _ := newTestServer(t, be, time.Minute)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -171,7 +178,7 @@ func TestProxyUnknownModel(t *testing.T) {
 func TestProxyMissingModel(t *testing.T) {
 	be := backend(t)
 	defer be.Close()
-	srv, _, _ := newTestServer(t, be)
+	srv, _, _ := newTestServer(t, be, time.Minute)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -188,7 +195,7 @@ func TestProxyMissingModel(t *testing.T) {
 func TestProxySwap(t *testing.T) {
 	be := backend(t)
 	defer be.Close()
-	srv, mgr, fs := newTestServer(t, be)
+	srv, mgr, fs := newTestServer(t, be, time.Minute)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -205,7 +212,54 @@ func TestProxySwap(t *testing.T) {
 	if mgr.Current() != "m2" {
 		t.Errorf("Current = %q, want m2", mgr.Current())
 	}
-	if len(fs.handles) != 2 {
-		t.Errorf("handles = %d, want 2 (one per model)", len(fs.handles))
+	if fs.count() != 2 {
+		t.Errorf("handles = %d, want 2 (one per model)", fs.count())
+	}
+}
+
+// TestProxyServedRefreshesIdleTTL verifies that a successful proxied
+// request refreshes the model's idle timer: more than TTL may have
+// passed since the model started, but since the response completed less
+// than TTL ago the model must stay loaded, and it is unloaded TTL after
+// the response.
+func TestProxyServedRefreshesIdleTTL(t *testing.T) {
+	// Backend whose response takes a while, so the request start and
+	// completion are far enough apart for the refresh to matter.
+	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer be.Close()
+	srv, mgr, _ := newTestServer(t, be, 150*time.Millisecond)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	resp := post(t, ts, `{"model":"m1"}`)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("status = %d, body: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+
+	// More than TTL has passed since the model started (~170ms), but
+	// less than TTL since the response completed (~70ms): the model
+	// must still be loaded.
+	time.Sleep(70 * time.Millisecond)
+	if mgr.Current() != "m1" {
+		t.Fatal("model unloaded although its last response completed within the TTL")
+	}
+
+	// Then it must be unloaded TTL after the response.
+	deadline := time.Now().Add(3 * time.Second)
+	for mgr.Current() != "" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if mgr.Current() != "" {
+		t.Fatal("model still loaded long after the refreshed idle TTL")
 	}
 }
