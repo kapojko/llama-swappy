@@ -81,6 +81,7 @@ func TestValidate(t *testing.T) {
 		{"empty name", func(c *Config) { m := c.Models["m1"]; m.Name = ""; c.Models["m1"] = m }, "name is required"},
 		{"empty cmd", func(c *Config) { m := c.Models["m1"]; m.Cmd = "   "; c.Models["m1"] = m }, "cmd is required"},
 		{"proxy without placeholder", func(c *Config) { m := c.Models["m1"]; m.Proxy = "http://127.0.0.1:12390"; c.Models["m1"] = m }, "proxy must contain"},
+		{"negative maxTokens", func(c *Config) { m := c.Models["m1"]; m.MaxTokens = -1; c.Models["m1"] = m }, "maxTokens"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -111,5 +112,20 @@ func TestLoadExampleFile(t *testing.T) {
 	}
 	if _, ok := c.Models["qwen3.8-27b"]; !ok {
 		t.Error("expected model key qwen3.8-27b")
+	}
+}
+
+func TestLoadMaxTokensOverride(t *testing.T) {
+	yaml := strings.Replace(validYAML, "    proxy: http://127.0.0.1:${PORT}\n  m2:",
+		"    proxy: http://127.0.0.1:${PORT}\n    maxTokens: 4096\n  m2:", 1)
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Models["m1"].MaxTokens != 4096 {
+		t.Errorf("m1.MaxTokens = %d, want 4096", c.Models["m1"].MaxTokens)
+	}
+	if c.Models["m2"].MaxTokens != 0 {
+		t.Errorf("m2.MaxTokens = %d, want 0 (unset)", c.Models["m2"].MaxTokens)
 	}
 }

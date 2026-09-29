@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"llama-swappy/internal/config"
+	"llama-swappy/internal/inspect"
 	"llama-swappy/internal/model"
+	"llama-swappy/internal/version"
 )
 
 // fakeHandle mimics a running process: it only "exits" when Kill is
@@ -86,7 +88,7 @@ func backend(t *testing.T) *httptest.Server {
 	}))
 }
 
-func newTestServer(t *testing.T, backend *httptest.Server, ttl time.Duration) (*Server, *model.Manager, *fakeStarter) {
+func newTestServer(t *testing.T, backend *httptest.Server, ttl time.Duration, infos map[string]inspect.Info) (*Server, *model.Manager, *fakeStarter) {
 	t.Helper()
 	u, err := url.Parse(backend.URL)
 	if err != nil {
@@ -115,7 +117,21 @@ func newTestServer(t *testing.T, backend *httptest.Server, ttl time.Duration) (*
 		PollInterval: 20 * time.Millisecond,
 	})
 	t.Cleanup(mgr.Close)
-	return New(cfg, mgr, log), mgr, fs
+	return New(cfg, mgr, log, infos), mgr, fs
+}
+
+func getJSON(t *testing.T, url string) (int, map[string]any) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("GET %s: decode: %v", url, err)
+	}
+	return resp.StatusCode, body
 }
 
 func post(t *testing.T, srv *httptest.Server, payload string) *http.Response {
@@ -130,7 +146,7 @@ func post(t *testing.T, srv *httptest.Server, payload string) *http.Response {
 func TestProxyRoundsTrip(t *testing.T) {
 	be := backend(t)
 	defer be.Close()
-	srv, mgr, fs := newTestServer(t, be, time.Minute)
+	srv, mgr, fs := newTestServer(t, be, time.Minute, nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -156,7 +172,7 @@ func TestProxyRoundsTrip(t *testing.T) {
 func TestProxyUnknownModel(t *testing.T) {
 	be := backend(t)
 	defer be.Close()
-	srv, _, _ := newTestServer(t, be, time.Minute)
+	srv, _, _ := newTestServer(t, be, time.Minute, nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -178,7 +194,7 @@ func TestProxyUnknownModel(t *testing.T) {
 func TestProxyMissingModel(t *testing.T) {
 	be := backend(t)
 	defer be.Close()
-	srv, _, _ := newTestServer(t, be, time.Minute)
+	srv, _, _ := newTestServer(t, be, time.Minute, nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -195,7 +211,7 @@ func TestProxyMissingModel(t *testing.T) {
 func TestProxySwap(t *testing.T) {
 	be := backend(t)
 	defer be.Close()
-	srv, mgr, fs := newTestServer(t, be, time.Minute)
+	srv, mgr, fs := newTestServer(t, be, time.Minute, nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -234,7 +250,7 @@ func TestProxyServedRefreshesIdleTTL(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer be.Close()
-	srv, mgr, _ := newTestServer(t, be, 150*time.Millisecond)
+	srv, mgr, _ := newTestServer(t, be, 150*time.Millisecond, nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -263,3 +279,125 @@ func TestProxyServedRefreshesIdleTTL(t *testing.T) {
 		t.Fatal("model still loaded long after the refreshed idle TTL")
 	}
 }
+
+func TestInfoEndpointNoModelLoaded(t *testing.T) {
+	be := backend(t)
+	defer be.Close()
+	infos := map[string]inspect.Info{
+		"m1": {ContextSize: 131072, Reasoning: boolPtr(true)},
+		// m2 has no entry: its script failed to parse at startup.
+	}
+	srv, _, _ := newTestServer(t, be, time.Minute, infos)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	code, body := getJSON(t, ts.URL+InfoPath)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if body["version"] != version.Version {
+		t.Errorf("version = %v, want %q", body["version"], version.Version)
+	}
+	if body["current"] != nil {
+		t.Errorf("current = %v, want null", body["current"])
+	}
+	models, ok := body["models"].([]any)
+	if !ok || len(models) != 2 {
+		t.Fatalf("models = %v, want 2 entries", body["models"])
+	}
+	// Sorted by key: m1 first.
+	m1 := models[0].(map[string]any)
+	if m1["key"] != "m1" || m1["name"] != "Model One" {
+		t.Errorf("m1 = %v", m1)
+	}
+	if m1["contextSize"] != float64(131072) {
+		t.Errorf("m1.contextSize = %v, want 131072", m1["contextSize"])
+	}
+	if m1["maxTokens"] != float64(32768) { // min(32768, 131072/2)
+		t.Errorf("m1.maxTokens = %v, want 32768", m1["maxTokens"])
+	}
+	if m1["reasoning"] != true {
+		t.Errorf("m1.reasoning = %v, want true", m1["reasoning"])
+	}
+	if _, present := m1["input"]; !present {
+		t.Error("m1.input missing")
+	}
+	m2 := models[1].(map[string]any)
+	for _, field := range []string{"contextSize", "maxTokens", "reasoning"} {
+		if _, present := m2[field]; present {
+			t.Errorf("m2.%s = %v, want omitted (parse failed)", field, m2[field])
+		}
+	}
+}
+
+func TestInfoEndpointCurrentModel(t *testing.T) {
+	be := backend(t)
+	defer be.Close()
+	srv, mgr, _ := newTestServer(t, be, time.Minute, nil)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	if _, err := mgr.EnsureModel("m2"); err != nil {
+		t.Fatalf("EnsureModel: %v", err)
+	}
+	code, body := getJSON(t, ts.URL+InfoPath)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	cur, ok := body["current"].(map[string]any)
+	if !ok {
+		t.Fatalf("current = %v, want object", body["current"])
+	}
+	if cur["key"] != "m2" || cur["name"] != "Model Two" {
+		t.Errorf("current = %v", cur)
+	}
+	secs, _ := cur["secondsToUnload"].(float64)
+	if secs < 0 || secs > 60 {
+		t.Errorf("secondsToUnload = %v, want in [0, 60]", secs)
+	}
+
+	// After unload the current model is null again.
+	mgr.StopAll()
+	_, body = getJSON(t, ts.URL+InfoPath)
+	if body["current"] != nil {
+		t.Errorf("current = %v, want null after StopAll", body["current"])
+	}
+}
+
+func TestModelsEndpoint(t *testing.T) {
+	be := backend(t)
+	defer be.Close()
+	srv, _, _ := newTestServer(t, be, time.Minute, nil)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	code, body := getJSON(t, ts.URL+ModelsPath)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if body["object"] != "list" {
+		t.Errorf("object = %v, want list", body["object"])
+	}
+	data, ok := body["data"].([]any)
+	if !ok || len(data) != 2 {
+		t.Fatalf("data = %v, want 2 entries", body["data"])
+	}
+	ids := []string{data[0].(map[string]any)["id"].(string), data[1].(map[string]any)["id"].(string)}
+	if ids[0] != "m1" || ids[1] != "m2" {
+		t.Errorf("ids = %v, want [m1 m2]", ids)
+	}
+
+	// Non-GET requests are rejected.
+	for _, path := range []string{InfoPath, ModelsPath} {
+		resp, err := http.Post(ts.URL+path, "application/json", bytes.NewReader([]byte(`{}`)))
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("POST %s: status = %d, want 405", path, resp.StatusCode)
+		}
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

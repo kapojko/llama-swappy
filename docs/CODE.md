@@ -95,6 +95,35 @@ mid-stream, since the timer is only refreshed when a response completes.
   is a no-op if key is no longer the active model, e.g. when an in-flight
   response of a swapped-out model completes after the swap.
 
+## Self-description endpoints
+
+Besides proxying, the server answers two GET endpoints itself (never
+proxied to a model; any other method gets 405):
+
+- `GET /llama-swappy/info` — JSON with the app `version`, the currently
+  loaded model (`key`, `name`, `secondsToUnload` — remaining idle time
+  from the same clock the unload monitor uses; `null` when nothing is
+  loaded) and every configured model (`key`, `name`, `input:
+  ["text"]` (hardcoded for now), plus derived fields). Intended for
+  clients such as the pi agent to configure models automatically.
+- `GET /v1/models` — the standard OpenAI model list, so generic
+  OpenAI clients can discover the configured model keys.
+
+**Model metadata** is parsed at startup from each model's run script
+(`internal/inspect`): the wrapper script referenced by `cmd` (a token
+ending in `.sh`, `.bash`, `.ps1`, `.bat` or `.cmd`, after `${PORT}`
+substitution) is read; if there is none, the `cmd` line itself is parsed
+as llama-server arguments. Parsing handles Unix and Windows line
+endings, `#` comments (leading and trailing), bash/PowerShell quoting,
+and takes the last uncommented occurrence when a flag appears several
+times. Derived fields: `contextSize` (`-c` / `--ctx-size`),
+`reasoning` (`--reasoning on|off`, bare flag = on), and `maxTokens`
+(explicit per-model `maxTokens` config > script `--max-tokens` >
+`min(32768, contextSize/2)`). A model whose script cannot be read or
+parsed (missing file, binary, ...) still works and is listed, but
+without the derived fields; the failure is logged as a warning at
+startup. Each model's parsed metadata is also logged at startup.
+
 ## Config
 
 YAML with exactly three top-level keys (see `example/llama-swap-config.yaml`):
@@ -102,7 +131,7 @@ YAML with exactly three top-level keys (see `example/llama-swap-config.yaml`):
 - `globalTTL` — idle seconds before unload
 - `startPort` — single port reused by whichever model is active; `${PORT}`
   in each model's `cmd` and `proxy` URL is substituted with it
-- `models` — map of model key -> `{name, cmd, proxy}`
+- `models` — map of model key -> `{name, cmd, proxy, maxTokens?}`
 
 Validation is in `config.Validate`.
 
@@ -112,5 +141,7 @@ Validation is in `config.Validate`.
 - `cmd/root.go` — cobra CLI: `--config` (required), `--listen`, `--version`
 - `cmd/version.go` — version constant (`Version`)
 - `internal/config` — YAML load/validate
+- `internal/inspect` — model metadata parsing from run scripts
 - `internal/model` — model lifecycle (start, readiness, idle, stop)
-- `internal/proxy` — OpenAI listener + reverse proxy
+- `internal/proxy` — OpenAI listener + reverse proxy + info endpoints
+- `internal/version` — application version constant

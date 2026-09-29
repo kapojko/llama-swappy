@@ -194,6 +194,23 @@ func (m *Manager) Current() string {
 	return m.cur.key
 }
 
+// IdleInfo reports the key of the loaded model and how much idle time
+// it has left before the monitor unloads it, or ok=false if no model
+// is loaded. The remaining time mirrors the monitor's clock: TTL minus
+// the time since the last completed response.
+func (m *Manager) IdleInfo() (key string, remaining time.Duration, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cur == nil {
+		return "", 0, false
+	}
+	rem := m.ttl - time.Since(m.lastActive)
+	if rem < 0 {
+		rem = 0
+	}
+	return m.cur.key, rem, true
+}
+
 // MarkServed reports that the model key produced a successful (2xx)
 // response. It resets the consecutive-crash counter on the model's next
 // exit and refreshes lastActive, so the idle TTL is counted from the

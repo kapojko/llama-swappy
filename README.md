@@ -30,6 +30,49 @@ Flags (only these two are supported, plus `--help`):
 Point any OpenAI-compatible client at `http://<listen-address>` and set the
 `model` field to a model key from your config.
 
+## Self-description endpoints
+
+llama-swappy also serves its own metadata, for tools (e.g. the pi agent
+provider extension) that want to configure models automatically:
+
+```
+GET /llama-swappy/info
+```
+
+```json
+{
+  "version": "1.2",
+  "current": {
+    "key": "qwen3.8-27b",
+    "name": "Qwen3.8-27B",
+    "secondsToUnload": 843
+  },
+  "models": [
+    {
+      "key": "qwen3.8-27b",
+      "name": "Qwen3.8-27B",
+      "contextSize": 114688,
+      "maxTokens": 32768,
+      "reasoning": true,
+      "input": ["text"]
+    }
+  ]
+}
+```
+
+- `current` is `null` when no model is loaded; `secondsToUnload` is the
+  remaining idle time before the model is unloaded.
+- Per-model fields are derived at startup by parsing the model's run
+  script (or the `cmd` line itself when there is no wrapper script):
+  `contextSize` from `-c`/`--ctx-size` (last uncommented occurrence),
+  `reasoning` from `--reasoning`, and `maxTokens` from an optional
+  per-model `maxTokens` config value, else the script's `--max-tokens`,
+  else `min(32768, contextSize/2)`. `input` is currently hardcoded to
+  `["text"]`. Fields that could not be derived (script missing, not a
+  text file, flag absent) are omitted.
+- `GET /v1/models` returns the standard OpenAI model list with the
+  configured model keys.
+
 ## Config format
 
 ```yaml
@@ -47,7 +90,8 @@ models:
 ```
 
 Only `globalTTL`, `startPort`, and `models` (with per-model `name`, `cmd`,
-`proxy`) are supported. `${PORT}` in `proxy` is always replaced with
+`proxy` and optional `maxTokens`) are supported. `${PORT}` in `proxy` is
+always replaced with
 `startPort` — the single active model always uses that port.
 
 ### Windows note
@@ -106,4 +150,8 @@ Besides unit tests, the suite includes integration tests that build a
 fake "llama-server" with the local go toolchain and exercise the real
 process spawning, stdout capture, idle unload — including a wrapper
 script that spawns the server as a grandchild (Unix only) — and the
-full config -> proxy pipeline over a real HTTP listener.
+full config -> proxy pipeline over a real HTTP listener, including the
+self-description endpoints with real run-script fixtures.
+On Windows the Unix-only end-to-end test is re-run inside the default
+WSL distro (needs a modern Go toolchain in `$HOME/sdk/go`; skipped if
+unavailable).

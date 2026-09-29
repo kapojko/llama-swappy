@@ -18,6 +18,10 @@ type Model struct {
 	Name  string `yaml:"name"`
 	Cmd   string `yaml:"cmd"`
 	Proxy string `yaml:"proxy"`
+	// MaxTokens optionally overrides the per-response output token
+	// limit reported by /llama-swappy/info. Zero (the default) lets the
+	// app derive it from the run script / context size.
+	MaxTokens int `yaml:"maxTokens,omitempty"`
 }
 
 // Config is the application configuration.
@@ -63,6 +67,9 @@ func (c *Config) Validate() error {
 		}
 		if !strings.Contains(m.Proxy, PortPlaceholder) {
 			return fmt.Errorf("model %q: proxy must contain %s", key, PortPlaceholder)
+		}
+		if m.MaxTokens < 0 {
+			return fmt.Errorf("model %q: maxTokens must be >= 0, got %d", key, m.MaxTokens)
 		}
 	}
 	return nil

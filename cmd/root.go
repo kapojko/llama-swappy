@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"llama-swappy/internal/config"
+	"llama-swappy/internal/inspect"
 	"llama-swappy/internal/model"
 	"llama-swappy/internal/proxy"
 )
@@ -53,9 +54,33 @@ func run(ctx context.Context, cfgPath, listen string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Parse each model's run script up front so the metadata is logged
+	// at startup and available for /llama-swappy/info. A model whose
+	// script cannot be read is still usable; it is just reported without
+	// the derived fields.
+	infos := make(map[string]inspect.Info, len(cfg.Models))
+	for key, m := range cfg.Models {
+		info, err := inspect.Inspect(m.Cmd, cfg.StartPort)
+		if err != nil {
+			log.Warn("model metadata: parse failed", "model", key, "err", err)
+			continue
+		}
+		infos[key] = info
+		attrs := []any{"model", key, "name", m.Name}
+		if info.ContextSize > 0 {
+			attrs = append(attrs, "contextSize", info.ContextSize)
+		}
+		if mt := inspect.MaxTokens(m.MaxTokens, info); mt > 0 {
+			attrs = append(attrs, "maxTokens", mt)
+		}
+		if info.Reasoning != nil {
+			attrs = append(attrs, "reasoning", *info.Reasoning)
+		}
+		log.Info("model metadata", attrs...)
+	}
 	mgr := model.New(cfg, model.Options{Logger: log, Out: os.Stdout})
 	defer mgr.Close()
-	server := proxy.New(cfg, mgr, log)
+	server := proxy.New(cfg, mgr, log, infos)
 
 	httpSrv := &http.Server{Addr: listen, Handler: server}
 	errCh := make(chan error, 1)

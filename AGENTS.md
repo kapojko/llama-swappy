@@ -15,8 +15,10 @@ CLI utility that runs llama.cpp server proxying OpenAI API for different models,
 - cmd/root.go — cobra CLI (`--config`, `--listen`, `--version`)
 - cmd/version.go — application version constant (`Version`)
 - internal/config — YAML config load/validate
+- internal/inspect — model metadata parsing from run scripts
 - internal/model — model lifecycle: start, readiness poll, idle unload, stop
-- internal/proxy — OpenAI request listener + reverse proxy
+- internal/proxy — OpenAI request listener + reverse proxy + info endpoints
+- internal/version — application version constant
 - internal/testutil — integration test helpers (fake server build, free port)
 - example/llama-swap-config.yaml — example config
 - README.md — usage documentation
@@ -41,6 +43,6 @@ llama-swappy.exe --config "$CONFIG_PATH" --listen 0.0.0.0:12380
 
 - When modifying code structure, always update `docs/CODE.md` to reflect changes.
 - NEVER commit without explicit order
-- When a commit changes the version (`cmd/version.go`), prepend the commit
+- When a commit changes the version (`internal/version/version.go`), prepend the commit
   message with the version in square brackets, e.g. `[1.0] Version updated`
   or `[1.0] <description of other changes>`.

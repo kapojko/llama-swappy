@@ -12,6 +12,9 @@ models:
     # 'env' sets the variable, and the presence of ${PORT} satisfies the validator
     cmd: env PORT=${PORT} /home/yury/run_qwen3.8_27b.sh
     proxy: http://127.0.0.1:${PORT}
+    # optional: override the per-response output token limit reported by
+    # /llama-swappy/info (default: min(32768, contextSize/2))
+    # maxTokens: 16384
 
   ornith-1.5-9b:
     name: "Ornith 1.5 9B"

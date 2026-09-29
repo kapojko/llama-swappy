@@ -1,4 +1,6 @@
 package cmd
 
+import "llama-swappy/internal/version"
+
 // Version is the application version, exposed via the --version flag.
-const Version = "1.1"
+const Version = version.Version
