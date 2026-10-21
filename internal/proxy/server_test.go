@@ -284,7 +284,9 @@ func TestInfoEndpointNoModelLoaded(t *testing.T) {
 	be := backend(t)
 	defer be.Close()
 	infos := map[string]inspect.Info{
-		"m1": {ContextSize: 131072, Reasoning: boolPtr(true)},
+		// ContextSize is already per-request (total / slots) and Slots
+		// is as parsed from the run script by internal/inspect.
+		"m1": {ContextSize: 36864, Slots: 4, Reasoning: boolPtr(true)},
 		// m2 has no entry: its script failed to parse at startup.
 	}
 	srv, _, _ := newTestServer(t, be, time.Minute, infos)
@@ -310,11 +312,14 @@ func TestInfoEndpointNoModelLoaded(t *testing.T) {
 	if m1["key"] != "m1" || m1["name"] != "Model One" {
 		t.Errorf("m1 = %v", m1)
 	}
-	if m1["contextSize"] != float64(131072) {
-		t.Errorf("m1.contextSize = %v, want 131072", m1["contextSize"])
+	if m1["contextSize"] != float64(36864) {
+		t.Errorf("m1.contextSize = %v, want 36864", m1["contextSize"])
 	}
-	if m1["maxTokens"] != float64(32768) { // min(32768, 131072/2)
-		t.Errorf("m1.maxTokens = %v, want 32768", m1["maxTokens"])
+	if m1["slots"] != float64(4) {
+		t.Errorf("m1.slots = %v, want 4", m1["slots"])
+	}
+	if m1["maxTokens"] != float64(18432) { // min(32768, 36864/2)
+		t.Errorf("m1.maxTokens = %v, want 18432", m1["maxTokens"])
 	}
 	if m1["reasoning"] != true {
 		t.Errorf("m1.reasoning = %v, want true", m1["reasoning"])
@@ -323,7 +328,7 @@ func TestInfoEndpointNoModelLoaded(t *testing.T) {
 		t.Error("m1.input missing")
 	}
 	m2 := models[1].(map[string]any)
-	for _, field := range []string{"contextSize", "maxTokens", "reasoning"} {
+	for _, field := range []string{"contextSize", "slots", "maxTokens", "reasoning"} {
 		if _, present := m2[field]; present {
 			t.Errorf("m2.%s = %v, want omitted (parse failed)", field, m2[field])
 		}

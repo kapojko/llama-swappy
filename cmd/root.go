@@ -70,6 +70,9 @@ func run(ctx context.Context, cfgPath, listen string) error {
 		if info.ContextSize > 0 {
 			attrs = append(attrs, "contextSize", info.ContextSize)
 		}
+		if info.Slots > 0 {
+			attrs = append(attrs, "slots", info.Slots)
+		}
 		if mt := inspect.MaxTokens(m.MaxTokens, info); mt > 0 {
 			attrs = append(attrs, "maxTokens", mt)
 		}

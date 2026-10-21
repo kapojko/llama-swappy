@@ -41,7 +41,7 @@ GET /llama-swappy/info
 
 ```json
 {
-  "version": "1.2",
+  "version": "1.3",
   "current": {
     "key": "qwen3.8-27b",
     "name": "Qwen3.8-27B",
@@ -51,8 +51,9 @@ GET /llama-swappy/info
     {
       "key": "qwen3.8-27b",
       "name": "Qwen3.8-27B",
-      "contextSize": 114688,
-      "maxTokens": 32768,
+      "contextSize": 36864,
+      "slots": 4,
+      "maxTokens": 18432,
       "reasoning": true,
       "input": ["text"]
     }
@@ -65,11 +66,15 @@ GET /llama-swappy/info
 - Per-model fields are derived at startup by parsing the model's run
   script (or the `cmd` line itself when there is no wrapper script):
   `contextSize` from `-c`/`--ctx-size` (last uncommented occurrence),
-  `reasoning` from `--reasoning`, and `maxTokens` from an optional
-  per-model `maxTokens` config value, else the script's `--max-tokens`,
-  else `min(32768, contextSize/2)`. `input` is currently hardcoded to
-  `["text"]`. Fields that could not be derived (script missing, not a
-  text file, flag absent) are omitted.
+  `slots` from `-np`/`--parallel`, `reasoning` from `--reasoning`, and
+  `maxTokens` from an optional per-model `maxTokens` config value, else
+  the script's `--max-tokens`, else `min(32768, contextSize/2)`.
+  Because llama-server divides the total `-c` value equally among the
+  parallel slots, `contextSize` is the per-request context (total
+  divided by `slots`); without `-np` llama-server's own default applies
+  (single slot on older builds, auto on newer ones). `input` is
+  currently hardcoded to `["text"]`. Fields that could not be derived
+  (script missing, not a text file, flag absent) are omitted.
 - `GET /v1/models` returns the standard OpenAI model list with the
   configured model keys.
 

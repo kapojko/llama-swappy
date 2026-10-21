@@ -21,10 +21,17 @@ const defaultMaxTokens = 32768
 // Info holds metadata derived from a model's run script or command
 // line. The zero value means "unknown" for every field.
 type Info struct {
-	// ContextSize is the llama-server context size (-c / --ctx-size).
-	// Zero means the script does not set it (llama-server then
-	// defaults to 4096).
+	// ContextSize is the per-request context size: the llama-server
+	// total context (-c / --ctx-size) divided by the number of
+	// parallel slots (-np / --parallel), because llama-server splits
+	// the context equally among slots and a single request only ever
+	// sees its slot's share. Zero means the script does not set -c
+	// (llama-server then defaults to 4096).
 	ContextSize int
+	// Slots is the number of parallel slots (-np / --parallel).
+	// Zero means the flag is absent (llama-server's own default then
+	// applies: one slot on older builds, auto on newer ones).
+	Slots int
 	// MaxTokens is an explicit --max-tokens value from the script.
 	// Zero means the script does not set it.
 	MaxTokens int
@@ -105,6 +112,7 @@ func parseFile(path string) (Info, error) {
 func parseArgs(args []string) Info {
 	var info Info
 	applyFlags(args, &info)
+	finalize(&info)
 	return info
 }
 
@@ -124,7 +132,21 @@ func parseLines(text string) Info {
 		}
 		applyFlags(tokensBeforeComment(line), &info)
 	}
+	finalize(&info)
 	return info
+}
+
+// finalize resolves the per-request context: llama-server divides the
+// total -c value equally among the -np parallel slots, so a single
+// request only sees ContextSize/slots tokens (with --kv-unified a slot
+// may exceed its equal share, but llama-swappy scripts do not use
+// that). Without -np (or with -np 1) the context is unchanged. It runs
+// after the whole script is parsed, so the relative order of -c and
+// -np does not matter.
+func finalize(info *Info) {
+	if info.Slots > 1 && info.ContextSize > 0 {
+		info.ContextSize /= info.Slots
+	}
 }
 
 // tokensBeforeComment splits a script line into tokens, stopping at an
@@ -214,6 +236,12 @@ func applyFlags(tokens []string, info *Info) {
 			if hasVal {
 				if n, err := strconv.Atoi(val); err == nil && n > 0 {
 					info.ContextSize = n
+				}
+			}
+		case "-np", "--parallel":
+			if hasVal {
+				if n, err := strconv.Atoi(val); err == nil && n > 0 {
+					info.Slots = n
 				}
 			}
 		case "--max-tokens":

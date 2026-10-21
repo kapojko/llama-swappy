@@ -146,6 +146,64 @@ func TestInspectNoContextFlag(t *testing.T) {
 	}
 }
 
+func TestInspectParallelSlots(t *testing.T) {
+	// -c is the total context; llama-server divides it equally among
+	// the -np slots, so the per-request context is c/np. The script
+	// intentionally sets -np before -c to check order independence,
+	// with a commented-out -np that must be ignored.
+	script := "#!/bin/bash\n" +
+		"llama-server -m model.gguf\n" +
+		"    #-np 2\n" +
+		"    -np 4\n" +
+		"    -c 147456\n"
+	path := writeFile(t, "run.sh", script)
+	info, err := Inspect(path, 0)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Slots != 4 {
+		t.Errorf("Slots = %d, want 4", info.Slots)
+	}
+	if info.ContextSize != 36864 { // 147456 / 4
+		t.Errorf("ContextSize = %d, want 36864 (total divided by slots)", info.ContextSize)
+	}
+	// MaxTokens derivation must use the per-request context:
+	// min(32768, 36864/2) = 18432.
+	if got := MaxTokens(0, info); got != 18432 {
+		t.Errorf("MaxTokens = %d, want 18432", got)
+	}
+}
+
+func TestInspectParallelEqualsForm(t *testing.T) {
+	path := writeFile(t, "run.sh", "#!/bin/bash\nllama-server --parallel=2 -c 8192\n")
+	info, err := Inspect(path, 0)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Slots != 2 {
+		t.Errorf("Slots = %d, want 2", info.Slots)
+	}
+	if info.ContextSize != 4096 { // 8192 / 2
+		t.Errorf("ContextSize = %d, want 4096", info.ContextSize)
+	}
+}
+
+func TestInspectNoParallelFlag(t *testing.T) {
+	// Without -np/--parallel the context stays as-is and Slots is 0
+	// (llama-server then runs a single slot).
+	path := writeFile(t, "run.sh", "#!/bin/bash\nllama-server -c 8192\n")
+	info, err := Inspect(path, 0)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Slots != 0 {
+		t.Errorf("Slots = %d, want 0 (flag absent)", info.Slots)
+	}
+	if info.ContextSize != 8192 {
+		t.Errorf("ContextSize = %d, want 8192", info.ContextSize)
+	}
+}
+
 func TestInspectMissingFile(t *testing.T) {
 	if _, err := Inspect("env PORT=${PORT} /nonexistent/run.sh", 12390); err == nil {
 		t.Fatal("expected error for missing script")

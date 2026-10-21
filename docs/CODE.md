@@ -104,7 +104,9 @@ proxied to a model; any other method gets 405):
   loaded model (`key`, `name`, `secondsToUnload` — remaining idle time
   from the same clock the unload monitor uses; `null` when nothing is
   loaded) and every configured model (`key`, `name`, `input:
-  ["text"]` (hardcoded for now), plus derived fields). Intended for
+  ["text"]` (hardcoded for now), plus derived fields; `contextSize` is
+  the per-request context, `slots` the parallel slot count, both
+  omitted when unknown). Intended for
   clients such as the pi agent to configure models automatically.
 - `GET /v1/models` — the standard OpenAI model list, so generic
   OpenAI clients can discover the configured model keys.
@@ -116,10 +118,17 @@ substitution) is read; if there is none, the `cmd` line itself is parsed
 as llama-server arguments. Parsing handles Unix and Windows line
 endings, `#` comments (leading and trailing), bash/PowerShell quoting,
 and takes the last uncommented occurrence when a flag appears several
-times. Derived fields: `contextSize` (`-c` / `--ctx-size`),
+times. Derived fields: `contextSize` (`-c` / `--ctx-size`, divided by
+the parallel slot count — see below), `slots` (`-np` / `--parallel`,
+omitted when the flag is absent; llama-server's own default applies —
+a single slot on older builds, auto on newer ones),
 `reasoning` (`--reasoning on|off`, bare flag = on), and `maxTokens`
 (explicit per-model `maxTokens` config > script `--max-tokens` >
-`min(32768, contextSize/2)`). A model whose script cannot be read or
+`min(32768, contextSize/2)`). Because llama-server divides the total
+`-c` value equally among the parallel slots, `contextSize` is the
+per-request context (total/slots); for `np=1` models it is unchanged.
+(With `--kv-unified` llama-server may let a slot exceed its equal
+share; the scripts llama-swappy runs do not use it.) A model whose script cannot be read or
 parsed (missing file, binary, ...) still works and is listed, but
 without the derived fields; the failure is logged as a warning at
 startup. Each model's parsed metadata is also logged at startup.

@@ -107,11 +107,14 @@ func TestLoadExampleFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load example: %v", err)
 	}
-	if len(c.Models) != 2 {
-		t.Fatalf("len(Models) = %d, want 2", len(c.Models))
+	want := []string{"qwen3.8-27b", "ornith-1.5-9b", "ornith-1.5-9b-np4", "swift-1.5-qwen3.8-27b"}
+	if len(c.Models) < len(want) {
+		t.Fatalf("len(Models) = %d, want at least %d", len(c.Models), len(want))
 	}
-	if _, ok := c.Models["qwen3.8-27b"]; !ok {
-		t.Error("expected model key qwen3.8-27b")
+	for _, key := range want {
+		if _, ok := c.Models[key]; !ok {
+			t.Errorf("expected model key %s", key)
+		}
 	}
 }
 

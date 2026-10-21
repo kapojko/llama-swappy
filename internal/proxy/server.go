@@ -137,6 +137,7 @@ type modelInfo struct {
 	Key         string   `json:"key"`
 	Name        string   `json:"name"`
 	ContextSize int      `json:"contextSize,omitempty"`
+	Slots       int      `json:"slots,omitempty"`
 	MaxTokens   int      `json:"maxTokens,omitempty"`
 	Reasoning   *bool    `json:"reasoning,omitempty"`
 	Input       []string `json:"input"`
@@ -172,6 +173,7 @@ func (s *Server) serveInfo(w http.ResponseWriter) {
 		def := s.cfg.Models[key]
 		mi := modelInfo{Key: key, Name: def.Name, Input: []string{"text"}}
 		mi.ContextSize = s.infos[key].ContextSize
+		mi.Slots = s.infos[key].Slots
 		mi.Reasoning = s.infos[key].Reasoning
 		mi.MaxTokens = inspect.MaxTokens(def.MaxTokens, s.infos[key])
 		resp.Models = append(resp.Models, mi)

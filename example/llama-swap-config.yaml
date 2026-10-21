@@ -1,7 +1,7 @@
 # ~/llama-swap-config.yaml
 
-# Automatically unload models after 15 minutes (900 seconds) of inactivity
-globalTTL: 900
+# Automatically unload models after 30 minutes (1800 seconds) of inactivity
+globalTTL: 1800
 
 # Start assigning ports from 12390 (llama-server instances)
 startPort: 12390
@@ -10,13 +10,20 @@ models:
   qwen3.8-27b:
     name: "Qwen3.8-27B"
     # 'env' sets the variable, and the presence of ${PORT} satisfies the validator
-    cmd: env PORT=${PORT} /home/yury/run_qwen3.8_27b.sh
+    cmd: env PORT=${PORT} /home/yury/run_qwen3.8-27b.sh
     proxy: http://127.0.0.1:${PORT}
-    # optional: override the per-response output token limit reported by
-    # /llama-swappy/info (default: min(32768, contextSize/2))
-    # maxTokens: 16384
 
   ornith-1.5-9b:
     name: "Ornith 1.5 9B"
     cmd: env PORT=${PORT} /home/yury/run_ornith_1.5_9B.sh
+    proxy: http://127.0.0.1:${PORT}
+
+  ornith-1.5-9b-np4:
+    name: "Ornith 1.5 9B (np4)"
+    cmd: env PORT=${PORT} /home/yury/run_ornith_1.5_9B_np4.sh
+    proxy: http://127.0.0.1:${PORT}
+
+  swift-1.5-qwen3.8-27b:
+    name: "Swift 1.5 Qwen3.8-27B"
+    cmd: env PORT=${PORT} /home/yury/run_swift-1.5-qwen3.8-27b.sh
     proxy: http://127.0.0.1:${PORT}
