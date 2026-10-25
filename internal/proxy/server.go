@@ -26,6 +26,10 @@ const InfoPath = "/llama-swappy/info"
 // configured models as id/name pairs.
 const ModelsPath = "/v1/models"
 
+// UnloadPath is the control endpoint that unloads the currently loaded
+// model on demand (POST only), without stopping the proxy itself.
+const UnloadPath = "/llama-swappy/unload"
+
 // Server listens for OpenAI-compatible requests, routes them to the
 // matching model (starting or swapping it as needed) and reverse
 // proxies the request to that model's llama-server.
@@ -83,6 +87,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.serveModels(w)
 		}
+		return
+	case UnloadPath:
+		if r.Method != http.MethodPost {
+			s.writeError(w, http.StatusMethodNotAllowed, "use POST")
+			return
+		}
+		s.serveUnload(w)
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -184,6 +195,31 @@ func (s *Server) serveInfo(w http.ResponseWriter) {
 			Name:            s.cfg.Models[key].Name,
 			SecondsToUnload: int(remaining.Seconds()),
 		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// unloadResponse is the payload of POST UnloadPath: the key of the
+// model that was unloaded, or null when nothing was loaded.
+type unloadResponse struct {
+	Unloaded *string `json:"unloaded"`
+}
+
+// serveUnload answers POST UnloadPath by unloading the currently loaded
+// model (the same code path the idle unload uses) and reporting which
+// model, if any, was stopped.
+func (s *Server) serveUnload(w http.ResponseWriter) {
+	key := s.mgr.Current()
+	if key == "" {
+		s.log.Info("unload requested: no model loaded")
+	} else {
+		s.log.Info("unload requested", "model", key)
+		s.mgr.StopAll()
+	}
+	resp := unloadResponse{}
+	if key != "" {
+		resp.Unloaded = &key
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)

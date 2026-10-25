@@ -369,6 +369,65 @@ func TestInfoEndpointCurrentModel(t *testing.T) {
 	}
 }
 
+func TestUnloadEndpoint(t *testing.T) {
+	be := backend(t)
+	defer be.Close()
+	srv, mgr, fs := newTestServer(t, be, time.Minute, nil)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// POST with no model loaded: 200 with unloaded=null.
+	resp, err := http.Post(ts.URL+UnloadPath, "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatalf("POST unload: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("status = %d, body: %s", resp.StatusCode, body)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if body["unloaded"] != nil {
+		t.Errorf("unloaded = %v, want null", body["unloaded"])
+	}
+
+	// Load a model, then POST again: the model is unloaded.
+	if _, err := mgr.EnsureModel("m1"); err != nil {
+		t.Fatalf("EnsureModel: %v", err)
+	}
+	resp, err = http.Post(ts.URL+UnloadPath, "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatalf("POST unload: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body = nil
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["unloaded"] != "m1" {
+		t.Errorf("unloaded = %v, want m1", body["unloaded"])
+	}
+	if mgr.Current() != "" {
+		t.Errorf("Current = %q, want empty after unload", mgr.Current())
+	}
+	if fs.count() != 1 {
+		t.Errorf("handles = %d, want 1 (no auto-restart after unload)", fs.count())
+	}
+
+	// Non-POST requests are rejected.
+	code, _ := getJSON(t, ts.URL+UnloadPath)
+	if code != http.StatusMethodNotAllowed {
+		t.Errorf("GET unload: status = %d, want 405", code)
+	}
+}
+
 func TestModelsEndpoint(t *testing.T) {
 	be := backend(t)
 	defer be.Close()

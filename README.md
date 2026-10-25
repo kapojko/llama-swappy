@@ -77,6 +77,16 @@ GET /llama-swappy/info
   (script missing, not a text file, flag absent) are omitted.
 - `GET /v1/models` returns the standard OpenAI model list with the
   configured model keys.
+- `POST /llama-swappy/unload` unloads the currently loaded model
+  immediately, without stopping the proxy (the next request restarts the
+  model). The response reports which model was stopped:
+
+  ```json
+  {"unloaded": "qwen3.8-27b"}
+  ```
+
+  `unloaded` is `null` when no model was loaded. Handy to free VRAM on
+  demand, e.g. `curl -X POST http://127.0.0.1:12380/llama-swappy/unload`.
 
 ## Config format
 

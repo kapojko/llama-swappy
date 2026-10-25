@@ -95,10 +95,10 @@ mid-stream, since the timer is only refreshed when a response completes.
   is a no-op if key is no longer the active model, e.g. when an in-flight
   response of a swapped-out model completes after the swap.
 
-## Self-description endpoints
+## Self-description and control endpoints
 
-Besides proxying, the server answers two GET endpoints itself (never
-proxied to a model; any other method gets 405):
+Besides proxying, the server answers two GET endpoints and one POST
+endpoint itself (never proxied to a model; any other method gets 405):
 
 - `GET /llama-swappy/info` — JSON with the app `version`, the currently
   loaded model (`key`, `name`, `secondsToUnload` — remaining idle time
@@ -110,6 +110,11 @@ proxied to a model; any other method gets 405):
   clients such as the pi agent to configure models automatically.
 - `GET /v1/models` — the standard OpenAI model list, so generic
   OpenAI clients can discover the configured model keys.
+- `POST /llama-swappy/unload` — unloads the currently loaded model
+  immediately (the same code path the idle unload uses; the proxy keeps
+  running and the next request restarts the model). Answers with the
+  key of the stopped model as `unloaded`, or `null` when nothing was
+  loaded.
 
 **Model metadata** is parsed at startup from each model's run script
 (`internal/inspect`): the wrapper script referenced by `cmd` (a token
@@ -152,5 +157,5 @@ Validation is in `config.Validate`.
 - `internal/config` — YAML load/validate
 - `internal/inspect` — model metadata parsing from run scripts
 - `internal/model` — model lifecycle (start, readiness, idle, stop)
-- `internal/proxy` — OpenAI listener + reverse proxy + info endpoints
+- `internal/proxy` — OpenAI listener + reverse proxy + info/unload endpoints
 - `internal/version` — application version constant
