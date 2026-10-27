@@ -22,7 +22,8 @@ proxy.Server            internal/proxy/server.go
 model.Manager           internal/model/manager.go
    │  a. if key already loaded and running -> return proxy URL
    │  b. else stop current model, spawn new one
-   │  c. poll <proxy>/health until ready (timeout => error, retry next request)
+   │  c. poll <proxy>/health until ready (process exit => fail fast;
+   │     timeout => error; both schedule a backoff auto-retry)
    │  d. record lastActive
    ▼
 llama-server (spawned process, stdout/stderr -> app stdout)
@@ -43,9 +44,10 @@ mid-stream, since the timer is only refreshed when a response completes.
 
 ## Process model
 
-- `Starter`/`Handle` interfaces in `internal/model` decouple process
+- `Handle` interface in `internal/model` decouples process
   spawning from the manager, so tests can run a fake starter against an
-  `httptest` "model server".
+  `httptest` "model server". `Handle` exposes `Kill`, `Wait` and a
+  `Done` channel (closed on process exit) used for fail-fast readiness.
 - The production starter (`ProcessStarter`) runs `cmd` as a plain command
   line (no shell) and wires the child's stdout+stderr directly to the
   application's stdout. The application's own logs go to stderr via
@@ -75,21 +77,36 @@ mid-stream, since the timer is only refreshed when a response completes.
 - The manager starts a `watch` goroutine per active model. It blocks on
   `handle.Wait`; when the process exits and the model is still current,
   the manager logs the unexpected exit (with its exit status), clears the
-  active model and schedules a fixed-delay auto-restart via
-  `time.AfterFunc` (default 10s, `Options.RestartDelay`). The restart
-  callback only starts the model if the manager is still open and no model
-  is loaded; any successful start cancels the pending timer, so a client
-  request during the restart window restarts immediately and the timer
-  no-ops. `stopLocked` clears the active model *before* killing, so
-  self-initiated exits (idle unload, swap, shutdown) are ignored by the
-  watcher.
+  active model and schedules a backoff auto-restart via `time.AfterFunc`
+  (see below). The restart callback only starts the model if the manager
+  is still open and no model is loaded; any successful start cancels the
+  pending timer, so a client request during the restart window restarts
+  immediately and the timer no-ops. `stopLocked` clears the active model
+  *before* killing, so self-initiated exits (idle unload, swap, shutdown)
+  are ignored by the watcher.
+- **Failed starts are retried too.** A start can fail in two ways: the
+  spawn itself errors, or the process dies (or never answers `/health`)
+  during the readiness wait — e.g. a llama-server that cannot allocate
+  GPU memory because the driver has not finished releasing the previous
+  model. The readiness wait selects on the handle's `Done` channel, so an
+  exited process fails the start in ~1s instead of burning the whole 5min
+  readiness timeout. Both failure kinds go through `failStartLocked`,
+  which schedules the same auto-restart as a crash: the client still gets
+  its immediate error (503 via the proxy), but the swap self-heals once
+  the transient cause (e.g. a GPU driver slowly releasing memory) is
+  gone — without waiting for the client to retry.
+- **Backoff.** The auto-restart delay doubles with each consecutive
+  failure of the same model (`Options.RestartDelay`, default 10s, then
+  20s, 40s, ... capped at `maxBackoff`, 2 minutes), so a model whose
+  start keeps failing is retried over minutes instead of being hammered.
 - A crash-loop cap prevents hammering a model that dies without ever
-   serving a request: each unexpected exit increments `crashLoops`
-   (reset when the exit follows a served model, i.e. one that answered a
-   2xx, and also by any explicit `EnsureModel` start, so one model's
-   unserved-crash streak cannot suppress another model's restarts); once
-   `crashLoops` exceeds `maxAutoRestarts` (3) no further auto-restart is
-   scheduled, but an explicit request always restarts the model.
+   serving a request: each failed start or unexpected exit increments
+   `crashLoops` for that model key (reset when it follows a served model,
+   i.e. one that answered a 2xx, and by any explicit `EnsureModel` request
+   for the key, so one model's failure streak cannot suppress another
+   model's restarts); once the count exceeds `maxAutoRestarts` (5) no
+   further auto-restart is scheduled, but an explicit request always
+   restarts the model.
 - The proxy records the response status code in its `startedWriter`;
   after each proxied request that completed with a 2xx it calls
   `Manager.MarkServed(key)` with the model key. `MarkServed` resets the

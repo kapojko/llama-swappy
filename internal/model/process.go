@@ -119,6 +119,12 @@ func (h *procHandle) Wait() error {
 	return h.result()
 }
 
+// Done returns a channel closed when the process has exited (see the
+// Handle interface).
+func (h *procHandle) Done() <-chan struct{} {
+	return h.finished
+}
+
 // stopErr treats an exit as the expected outcome of Kill: the process is
 // gone, so a termination exit status (signal or non-zero code) is not a
 // failure. Only errors that are not an exit (e.g. ErrWaitDelay, when a

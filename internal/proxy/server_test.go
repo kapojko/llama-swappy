@@ -22,11 +22,13 @@ import (
 // fakeHandle mimics a running process: it only "exits" when Kill is
 // called, and Wait returns the cached exit error idempotently.
 type fakeHandle struct {
-	mu     sync.Mutex
-	killed bool
-	done   chan error
-	res    error
-	reaped bool
+	mu       sync.Mutex
+	killed   bool
+	done     chan error
+	finished chan struct{}
+	closeOne sync.Once
+	res      error
+	reaped   bool
 }
 
 // Kill signals a clean exit first (without the lock, since Wait may be
@@ -36,11 +38,15 @@ func (h *fakeHandle) Kill() error {
 	case h.done <- nil:
 	default:
 	}
+	h.closeOne.Do(func() { close(h.finished) })
 	h.mu.Lock()
 	h.killed = true
 	h.mu.Unlock()
 	return nil
 }
+
+// Done reports the exit, mirroring procHandle.Done.
+func (h *fakeHandle) Done() <-chan struct{} { return h.finished }
 
 func (h *fakeHandle) Wait() error {
 	h.mu.Lock()
@@ -59,7 +65,7 @@ type fakeStarter struct {
 }
 
 func (s *fakeStarter) Start(_ string, _ io.Writer) (model.Handle, error) {
-	h := &fakeHandle{done: make(chan error, 1)}
+	h := &fakeHandle{done: make(chan error, 1), finished: make(chan struct{})}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.handles = append(s.handles, h)

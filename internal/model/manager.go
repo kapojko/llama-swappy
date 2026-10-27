@@ -23,6 +23,9 @@ type Starter interface {
 type Handle interface {
 	Kill() error
 	Wait() error
+	// Done returns a channel that is closed once the process has
+	// exited, so a readiness wait can fail fast on an early exit.
+	Done() <-chan struct{}
 }
 
 // defaultRestartDelay is how long the manager waits after an unexpected
@@ -30,9 +33,14 @@ type Handle interface {
 const defaultRestartDelay = 10 * time.Second
 
 // maxAutoRestarts caps the number of consecutive auto-restarts after
-// crashes that never served a request; beyond it, only an explicit
-// request restarts the model.
-const maxAutoRestarts = 3
+// crashes or failed starts that never served a request; beyond it, only
+// an explicit request restarts the model. Together with the backoff
+// below the default of 5 spans several minutes, enough to outlast
+// GPU drivers that release the previous model's memory slowly.
+const maxAutoRestarts = 5
+
+// maxBackoff caps the exponential growth of the auto-restart delay.
+const maxBackoff = 2 * time.Minute
 
 // Options configures the Manager. Zero values fall back to sensible
 // defaults (TTL from config, 5m readiness timeout, 500ms polling, 10s
@@ -73,7 +81,9 @@ type Manager struct {
 	mu           sync.Mutex
 	cur          *active
 	lastActive   time.Time
-	crashLoops   int
+	// crashLoops counts consecutive starts (spawn errors, crashes,
+	// readiness failures) per model key that never served a request.
+	crashLoops   map[string]int
 	restartTimer *time.Timer
 
 	ctx    context.Context
@@ -123,6 +133,7 @@ func New(cfg *config.Config, opts Options) *Manager {
 		readyTimeout: ready,
 		poll:         poll,
 		restartDelay: restart,
+		crashLoops:   map[string]int{},
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -145,9 +156,10 @@ func (m *Manager) EnsureModel(key string) (string, error) {
 		m.log.Info("swapping out model", "model", m.cur.key, "in", key)
 		m.stopLocked()
 	}
-	// An explicit request starts a fresh crash-streak: the previous
-	// model's unserved crashes must not suppress this model's restarts.
-	m.crashLoops = 0
+	// An explicit request starts a fresh crash-streak for this model: a
+	// burned-out streak must not block a deliberate retry. Streaks of
+	// other models are tracked separately.
+	delete(m.crashLoops, key)
 	return m.startLocked(key)
 }
 
@@ -165,12 +177,14 @@ func (m *Manager) startLocked(key string) (string, error) {
 	h, err := m.starter.Start(cmd, m.out)
 	if err != nil {
 		m.log.Error("start failed", "model", key, "err", err)
+		m.failStartLocked(key, err)
 		return "", fmt.Errorf("start model %q: %w", key, err)
 	}
-	if err := m.waitReady(proxyURL); err != nil {
+	if err := m.waitReady(proxyURL, h); err != nil {
 		_ = h.Kill()
 		_ = h.Wait()
 		m.log.Error("model not ready, unloaded", "model", key, "err", err)
+		m.failStartLocked(key, err)
 		return "", fmt.Errorf("model %q not ready: %w", key, err)
 	}
 	// Any successful start cancels a pending crash restart, so a client
@@ -288,8 +302,8 @@ func (m *Manager) stopLocked() {
 }
 
 // watch observes the model process. On an unexpected exit it clears the
-// active model and schedules a fixed-delay auto-restart, unless the
-// crash-loop cap has been reached.
+// active model and schedules an auto-restart, unless the crash-loop cap
+// has been reached.
 func (m *Manager) watch(a *active) {
 	err := a.handle.Wait()
 	m.mu.Lock()
@@ -302,29 +316,50 @@ func (m *Manager) watch(a *active) {
 	m.log.Error("model exited unexpectedly", "model", a.key, "uptime", time.Since(a.startedAt), "err", err)
 	m.cur = nil
 	if a.served {
-		m.crashLoops = 0
+		delete(m.crashLoops, a.key)
 	}
-	m.crashLoops++
-	if m.crashLoops > maxAutoRestarts {
-		m.log.Warn("auto-restart suppressed: consecutive crashes without a served request", "model", a.key, "crashes", m.crashLoops)
-		return
-	}
-	m.scheduleRestartLocked(a.key)
+	m.failStartLocked(a.key, err)
 }
 
-// scheduleRestartLocked arms the fixed-delay auto-restart for key. The
-// caller must hold m.mu.
+// failStartLocked records a failed start of key — a spawn error, a crash,
+// or a readiness failure — and schedules an auto-retry with backoff,
+// unless the consecutive-failure cap is reached. A failed load is often
+// transient (e.g. a GPU driver that releases the previous model's memory
+// asynchronously), so retrying heals the swap without client action.
+// The caller must hold m.mu.
+func (m *Manager) failStartLocked(key string, cause error) {
+	m.crashLoops[key]++
+	if m.crashLoops[key] > maxAutoRestarts {
+		m.log.Warn("auto-restart suppressed: consecutive failures without a served request",
+			"model", key, "failures", m.crashLoops[key], "err", cause)
+		return
+	}
+	m.scheduleRestartLocked(key)
+}
+
+// scheduleRestartLocked arms the backoff auto-restart for key: the delay
+// doubles with each consecutive failure (restartDelay, 2x, 4x, ...),
+// capped at maxBackoff, so a model whose start keeps failing (e.g. while
+// a GPU driver slowly releases memory) is retried over minutes instead
+// of being hammered. The caller must hold m.mu.
 func (m *Manager) scheduleRestartLocked(key string) {
 	if m.restartTimer != nil {
 		m.restartTimer.Stop()
 	}
-	m.restartTimer = time.AfterFunc(m.restartDelay, func() {
+	delay := m.restartDelay
+	for i := 1; i < m.crashLoops[key] && delay < maxBackoff; i++ {
+		delay *= 2
+	}
+	if delay > maxBackoff {
+		delay = maxBackoff
+	}
+	m.restartTimer = time.AfterFunc(delay, func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.ctx.Err() != nil || m.cur != nil {
 			return
 		}
-		m.log.Info("restarting model after crash", "model", key)
+		m.log.Info("restarting model after failure", "model", key, "delay", delay)
 		if _, err := m.startLocked(key); err != nil {
 			m.log.Error("auto-restart failed", "model", key, "err", err)
 		}
@@ -340,9 +375,10 @@ func (m *Manager) cancelRestartTimerLocked() {
 	}
 }
 
-// waitReady polls proxyURL + "/health" until it answers 2xx/3xx or the
-// readiness timeout expires.
-func (m *Manager) waitReady(proxyURL string) error {
+// waitReady polls proxyURL + "/health" until it answers 2xx/3xx, the
+// process exits (fail fast: a crashed load must not burn the whole
+// readiness timeout), or the readiness timeout expires.
+func (m *Manager) waitReady(proxyURL string, h Handle) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	url := strings.TrimRight(proxyURL, "/") + "/health"
 	deadline := time.Now().Add(m.readyTimeout)
@@ -357,6 +393,11 @@ func (m *Manager) waitReady(proxyURL string) error {
 		select {
 		case <-m.ctx.Done():
 			return fmt.Errorf("manager closed")
+		case <-h.Done():
+			if werr := h.Wait(); werr != nil {
+				return fmt.Errorf("model process exited before becoming ready: %w", werr)
+			}
+			return fmt.Errorf("model process exited before becoming ready")
 		case <-time.After(m.poll):
 		}
 	}

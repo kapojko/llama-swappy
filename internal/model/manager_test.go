@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,12 +26,14 @@ import (
 // returns the cached exit error idempotently. Kill exits with exitErr
 // if it is set, to simulate e.g. a real signal-terminated exit.
 type fakeHandle struct {
-	mu      sync.Mutex
-	killed  bool
-	exitErr error
-	done    chan error
-	res     error
-	reaped  bool
+	mu        sync.Mutex
+	killed    bool
+	exitErr   error
+	done      chan error
+	finished  chan struct{}
+	closeOnce sync.Once
+	res       error
+	reaped    bool
 }
 
 // Kill signals a clean exit first (without the lock, since Wait may be
@@ -53,7 +56,11 @@ func (h *fakeHandle) signalExit(err error) {
 	case h.done <- err:
 	default:
 	}
+	h.closeOnce.Do(func() { close(h.finished) })
 }
+
+// Done reports the exit, mirroring procHandle.Done.
+func (h *fakeHandle) Done() <-chan struct{} { return h.finished }
 
 func (h *fakeHandle) Wait() error {
 	h.mu.Lock()
@@ -76,14 +83,22 @@ type fakeStarter struct {
 	mu      sync.Mutex
 	handles []*fakeHandle
 	cmds    []string
+	starts  []time.Time
+	// failAll makes every started handle exit immediately, simulating
+	// processes that die during model load.
+	failAll bool
 }
 
 func (s *fakeStarter) Start(cmd string, _ io.Writer) (Handle, error) {
-	h := &fakeHandle{done: make(chan error, 1)}
+	h := &fakeHandle{done: make(chan error, 1), finished: make(chan struct{})}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failAll {
+		h.signalExit(fmt.Errorf("exit status 1"))
+	}
 	s.handles = append(s.handles, h)
 	s.cmds = append(s.cmds, cmd)
+	s.starts = append(s.starts, time.Now())
 	return h, nil
 }
 
@@ -528,6 +543,117 @@ func TestServedCrashResetsLoop(t *testing.T) {
 	waitForCurrent(t, m, "m1")
 	if fs.count() != maxAutoRestarts+2 {
 		t.Errorf("handles = %d, want %d", fs.count(), maxAutoRestarts+2)
+	}
+}
+
+// failingBackend serves /health with 500 until healthy is set, standing
+// in for a model server that never becomes ready.
+func failingBackend(healthy *atomic.Bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !healthy.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+}
+
+// TestFailedStartFailsFastAndAutoRetries verifies that a model whose
+// process exits during the readiness wait (e.g. a llama-server that fails
+// to load) returns the error immediately instead of burning the readiness
+// timeout, and is auto-retried after the restart delay.
+func TestFailedStartFailsFastAndAutoRetries(t *testing.T) {
+	var healthy atomic.Bool
+	ts := failingBackend(&healthy)
+	defer ts.Close()
+	m, fs := newTestManager(t, ts, time.Minute, 30*time.Second, 200*time.Millisecond)
+
+	fs.failAll = true
+	start := time.Now()
+	if _, err := m.EnsureModel("m1"); err == nil {
+		t.Fatal("expected failed start error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("EnsureModel returned after %s; an exit during readiness must fail fast", elapsed)
+	}
+	if m.Current() != "" {
+		t.Errorf("Current = %q, want empty after failed start", m.Current())
+	}
+	if fs.count() != 1 {
+		t.Fatalf("handles = %d, want 1", fs.count())
+	}
+
+	// The auto-retry must bring the model up once the transient cause
+	// (here: the failing backend) is gone — without a client request.
+	fs.failAll = false
+	healthy.Store(true)
+	waitForCurrent(t, m, "m1")
+	if fs.count() != 2 {
+		t.Errorf("handles = %d, want 2 after auto-retry", fs.count())
+	}
+}
+
+// TestFailedStartBackoffGrows verifies that the retry delay doubles with
+// each consecutive failure: with restartDelay d the second attempt fires
+// after ~d, the third after ~d+2d, not after d+d.
+func TestFailedStartBackoffGrows(t *testing.T) {
+	var healthy atomic.Bool
+	ts := failingBackend(&healthy)
+	defer ts.Close()
+	m, fs := newTestManager(t, ts, time.Minute, 5*time.Second, 100*time.Millisecond)
+	fs.failAll = true
+
+	if _, err := m.EnsureModel("m1"); err == nil {
+		t.Fatal("expected failed start error")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for fs.count() < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fs.count() < 3 {
+		t.Fatalf("handles = %d, want at least 3 attempts", fs.count())
+	}
+	fs.mu.Lock()
+	d1 := fs.starts[1].Sub(fs.starts[0])
+	d2 := fs.starts[2].Sub(fs.starts[1])
+	fs.mu.Unlock()
+	if d1 > 150*time.Millisecond {
+		t.Errorf("first retry delay = %s, want ~100ms", d1)
+	}
+	if d2 < 150*time.Millisecond {
+		t.Errorf("second retry delay = %s, want ~200ms (backoff must double)", d2)
+	}
+}
+
+// TestFailedStartCapSuppressesRetry verifies that failed starts stop
+// being retried once the consecutive-failure cap is exhausted.
+func TestFailedStartCapSuppressesRetry(t *testing.T) {
+	var healthy atomic.Bool
+	ts := failingBackend(&healthy)
+	defer ts.Close()
+	m, fs := newTestManager(t, ts, time.Minute, 5*time.Second, 50*time.Millisecond)
+	fs.failAll = true
+	if _, err := m.EnsureModel("m1"); err == nil {
+		t.Fatal("expected failed start error")
+	}
+
+	// Initial attempt + maxAutoRestarts retries. With backoff the last
+	// (5th) retry fires 50*(1+2+4+8+16) = 1550ms after the first start.
+	deadline := time.Now().Add(5 * time.Second)
+	for fs.count() < maxAutoRestarts+1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fs.count() != maxAutoRestarts+1 {
+		t.Fatalf("handles = %d, want %d", fs.count(), maxAutoRestarts+1)
+	}
+	// A 6th retry would fire 1600ms after the 5th failure; make sure it
+	// never comes.
+	time.Sleep(1800 * time.Millisecond)
+	if fs.count() != maxAutoRestarts+1 {
+		t.Errorf("handles = %d; retries must stop after %d consecutive failures", fs.count(), maxAutoRestarts)
+	}
+	if m.Current() != "" {
+		t.Errorf("Current = %q, want empty while retries are suppressed", m.Current())
 	}
 }
 

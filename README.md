@@ -148,19 +148,25 @@ cmd: cmd /c "set PORT=%PORT% & llama-server.exe ..."
 
 - **Start**: on a request for a model that is not loaded, the current model
   (if any) is stopped, the new model's `cmd` is spawned, and the app polls
-  `<proxy>/health` until it is ready (timeout: 5 minutes; on timeout the
-  model is unloaded and the request gets a 503 — the next request retries).
+  `<proxy>/health` until it is ready (timeout: 5 minutes). If the process
+  exits during the wait (e.g. it failed to load), the start fails
+  immediately instead of burning the timeout; the request gets a 503, and
+  the start is scheduled for an automatic retry (see below).
 - **Proxy**: the request is reverse-proxied to the model's `proxy` URL and
   streamed back.
 - **Idle unload**: if no requests arrive for `globalTTL` seconds, the model
   is stopped (on Unix: SIGTERM to its whole process group, escalating to
   SIGKILL after a 10s grace; on Windows: the direct child is killed).
-- **Crash recovery**: if the model process exits unexpectedly (e.g.
-  segfault), the exit is detected, the model is cleared, and it is
-  auto-restarted after 10 seconds — or immediately on the next request in
-   the meantime. Auto-restart is suppressed after 3 consecutive crashes
-   that never served a 2xx response; any subsequent request starts the
-   model and begins a fresh crash streak.
+- **Crash recovery / failed-start retry**: if the model process exits
+  unexpectedly (e.g. segfault), or a start fails (spawn error, exit or
+  timeout during readiness), the model is cleared and auto-restarted
+  after 10 seconds — or immediately on the next request in the meantime.
+  The retry delay doubles with each consecutive failure (10s → 20s → 40s
+  → ... capped at 2 minutes), so transient start failures — e.g. a GPU
+  driver that releases the previous model's memory asynchronously —
+  self-heal over minutes. Auto-retry is suppressed after 5 consecutive
+  failures that never served a 2xx response; any subsequent request
+  starts the model and begins a fresh failure streak.
 - **Output**: the model process's stdout/stderr go to llama-swappy's
   stdout; llama-swappy's own logs go to stderr.
 - **Shutdown**: Ctrl+C stops the server and unloads any loaded model.
