@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"sort"
+	"strings"
 
 	"llama-swappy/internal/config"
 	"llama-swappy/internal/inspect"
@@ -29,6 +30,25 @@ const ModelsPath = "/v1/models"
 // UnloadPath is the control endpoint that unloads the currently loaded
 // model on demand (POST only), without stopping the proxy itself.
 const UnloadPath = "/llama-swappy/unload"
+
+// LlamaPathPrefix is the namespace under which selected native
+// llama-server endpoints are exposed: /llama/<path> is forwarded to the
+// target model's llama-server as /<path>. The exposed endpoints are
+// listed in llamaNativeEndpoints; everything else under the prefix gets
+// a 404. Keeping the list here (instead of in a fronting reverse proxy
+// such as nginx) means the fronting proxy only ever needs one stable
+// routing rule for the prefix.
+const LlamaPathPrefix = "/llama"
+
+// llamaNativeEndpoints lists the native llama-server endpoints (paths
+// relative to LlamaPathPrefix) that are forwarded to the target model.
+// Only non-inference helpers are allowed: they use the model's tokenizer
+// or templates without touching prefill/decode.
+var llamaNativeEndpoints = map[string]bool{
+	"/tokenize":       true,
+	"/detokenize":     true,
+	"/apply-template": true,
+}
 
 // Server listens for OpenAI-compatible requests, routes them to the
 // matching model (starting or swapping it as needed) and reverse
@@ -95,6 +115,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.serveUnload(w)
 		return
+	}
+	// Requests under LlamaPathPrefix are forwarded to the target model's
+	// llama-server with the prefix stripped, if the endpoint is on the
+	// whitelist. The "model" field in the body still selects the model,
+	// same as for the OpenAI routes.
+	if rest, ok := strings.CutPrefix(r.URL.Path, LlamaPathPrefix); ok {
+		if !llamaNativeEndpoints[rest] {
+			s.writeError(w, http.StatusNotFound, "unknown path "+r.URL.Path+"; allowed under "+LlamaPathPrefix+": tokenize, detokenize, apply-template")
+			return
+		}
+		r.URL.Path = rest
+		r.URL.RawPath = ""
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {

@@ -280,6 +280,99 @@ func TestProxyServedRefreshesIdleTTL(t *testing.T) {
 	}
 }
 
+// TestLlamaPrefixTokenize verifies that /llama/tokenize is forwarded to
+// the target model's llama-server as /tokenize, with the body (including
+// the model field) passed through unchanged.
+func TestLlamaPrefixTokenize(t *testing.T) {
+	var upstreamPath string
+	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		upstreamPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer be.Close()
+	srv, mgr, _ := newTestServer(t, be, time.Minute, nil)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	req := `{"model":"m1","content":"Hello, world!"}`
+	resp, err := http.Post(ts.URL+LlamaPathPrefix+"/tokenize", "application/json", bytes.NewReader([]byte(req)))
+	if err != nil {
+		t.Fatalf("POST tokenize: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body: %s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != req {
+		t.Errorf("proxied body = %q, want the request body echoed", body)
+	}
+	if upstreamPath != "/tokenize" {
+		t.Errorf("upstream path = %q, want /tokenize", upstreamPath)
+	}
+	if mgr.Current() != "m1" {
+		t.Errorf("Current = %q, want m1", mgr.Current())
+	}
+}
+
+// TestLlamaPrefixWhitelist verifies that paths under /llama/ which are
+// not on the whitelist are rejected with 404 before any model is started.
+func TestLlamaPrefixWhitelist(t *testing.T) {
+	be := backend(t)
+	defer be.Close()
+	srv, _, fs := newTestServer(t, be, time.Minute, nil)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	for _, path := range []string{
+		LlamaPathPrefix + "/completion",   // native llama-server route, not whitelisted
+		LlamaPathPrefix + "/props",        // native llama-server route, not whitelisted
+		LlamaPathPrefix + "/health",       // readiness is handled by the manager itself
+		LlamaPathPrefix,                  // bare prefix
+		LlamaPathPrefix + "/tokenize/extra", // near-miss
+	} {
+		resp, err := http.Post(ts.URL+path, "application/json", bytes.NewReader([]byte(`{"model":"m1"}`)))
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("POST %s: status = %d, want 404 (body: %s)", path, resp.StatusCode, body)
+		}
+	}
+	if fs.count() != 0 {
+		t.Errorf("handles = %d, want 0 (no model may start for rejected paths)", fs.count())
+	}
+}
+
+// TestLlamaPrefixRequiresModel verifies that the whitelisted native
+// endpoints still need the model field for routing.
+func TestLlamaPrefixRequiresModel(t *testing.T) {
+	be := backend(t)
+	defer be.Close()
+	srv, _, _ := newTestServer(t, be, time.Minute, nil)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+LlamaPathPrefix+"/tokenize", "application/json", bytes.NewReader([]byte(`{"content":"hi"}`)))
+	if err != nil {
+		t.Fatalf("POST tokenize: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 400 (body: %s)", resp.StatusCode, body)
+	}
+}
+
 func TestInfoEndpointNoModelLoaded(t *testing.T) {
 	be := backend(t)
 	defer be.Close()

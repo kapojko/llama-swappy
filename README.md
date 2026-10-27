@@ -88,6 +88,32 @@ GET /llama-swappy/info
   `unloaded` is `null` when no model was loaded. Handy to free VRAM on
   demand, e.g. `curl -X POST http://127.0.0.1:12380/llama-swappy/unload`.
 
+## Native llama-server endpoints (`/llama/...`)
+
+A small set of native llama-server endpoints is exposed under the
+`/llama` prefix; the proxy strips the prefix and forwards the request to
+the requested model's llama-server. These are tokenizer/template
+helpers: they never run prefill or decode. The `model` field in the
+request body still selects the model (and starts or swaps it in, like
+any other request):
+
+```
+POST /llama/tokenize    {"model": "qwen3.8-27b", "content": "Hello", "add_special": true}
+POST /llama/detokenize  {"model": "qwen3.8-27b", "tokens": [9707, 615]}
+POST /llama/apply-template  {"model": "qwen3.8-27b", "messages": [...]}
+```
+
+Anything else under `/llama/` is rejected with 404. Because the exposed
+endpoints are whitelisted in the proxy itself, a fronting reverse proxy
+(e.g. nginx) only needs one stable rule to expose them:
+
+```nginx
+location ~ ^/(v1|llama-swappy|llama)/ {
+    proxy_pass http://127.0.0.1:12380;
+    ...
+}
+```
+
 ## Config format
 
 ```yaml

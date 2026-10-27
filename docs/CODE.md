@@ -10,12 +10,14 @@ model "swaps" the current one out first.
 
 ```
 client (OpenAI API)
-   │  POST /v1/... {"model": "<key>", ...}
+   │  POST /v1/... or /llama/<endpoint>  {"model": "<key>", ...}
    ▼
 proxy.Server            internal/proxy/server.go
-   │  1. parse body, read "model" field
-   │  2. unknown model  -> 404
-   │  3. mgr.EnsureModel(key)
+   │  1. serve /llama-swappy/*, /v1/models itself; strip /llama prefix
+   │     and whitelist-check the native endpoint
+   │  2. parse body, read "model" field
+   │  3. unknown model  -> 404
+   │  4. mgr.EnsureModel(key)
    ▼
 model.Manager           internal/model/manager.go
    │  a. if key already loaded and running -> return proxy URL
@@ -115,6 +117,15 @@ endpoint itself (never proxied to a model; any other method gets 405):
   running and the next request restarts the model). Answers with the
   key of the stopped model as `unloaded`, or `null` when nothing was
   loaded.
+- `POST /llama/<path>` — forwards select native llama-server endpoints
+  (`tokenize`, `detokenize`, `apply-template`) to the target model's
+  llama-server with the prefix stripped; the whitelist is the
+  `llamaNativeEndpoints` map in `internal/proxy/server.go`, anything
+  else under the prefix gets 404. These endpoints are tokenizer and
+  template helpers without prefill/decode. The `model` body field still
+  routes the request (and loads/swaps the model in as usual). The
+  whitelist lives in the proxy so a fronting reverse proxy only needs
+  one stable routing rule for the `/llama/` prefix.
 
 **Model metadata** is parsed at startup from each model's run script
 (`internal/inspect`): the wrapper script referenced by `cmd` (a token
