@@ -55,7 +55,11 @@ mid-stream, since the timer is only refreshed when a response completes.
   honored, so `cmd /c "set PORT=%PORT% & server ..."` becomes the
   arguments ["cmd", "/c", "set PORT=%PORT% & server ..."]; on Windows
   exec re-quotes each argument for CreateProcess, restoring the original
-  command line.
+  command line. The recommended Windows invocation is a PowerShell
+  wrapper that takes the port as a parameter:
+  `powershell -NoProfile -ExecutionPolicy Bypass -File <script>.ps1 -Port ${PORT}`;
+  the script declares `param([int]$Port)` (see README and
+  `example/run_qwen3.8-27b.ps1`).
 - Unloading stops the model's whole process group on Unix (SIGTERM,
   escalating to SIGKILL after a 10s grace), which covers wrapper scripts
   that spawn the server; on Windows only the direct child is killed
@@ -165,6 +169,12 @@ share; the scripts llama-swappy runs do not use it.) A model whose script cannot
 parsed (missing file, binary, ...) still works and is listed, but
 without the derived fields; the failure is logged as a warning at
 startup. Each model's parsed metadata is also logged at startup.
+Every uncommented line is tokenized, so no-op "hint" lines can declare
+metadata for runners that hide the real flags in their own config: bash
+`:` no-op arguments (`: -c 115000 -np 1`) and a PowerShell stub function
+(`llama-swappy-metadata -c 115000 -np 1`, defined as `function
+llama-swappy-metadata {}`) are both parsed as plain flags. Hint values
+must be literal numbers.
 
 ## Config
 
@@ -180,6 +190,8 @@ Validation is in `config.Validate`.
 ## Package layout
 
 - `main.go` — entrypoint
+- `build.ps1`, `build.sh` — build helper scripts (wrappers around
+  `go build`; optional output path argument)
 - `cmd/root.go` — cobra CLI: `--config` (required), `--listen`, `--version`
 - `cmd/version.go` — version constant (`Version`)
 - `internal/config` — YAML load/validate

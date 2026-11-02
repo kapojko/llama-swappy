@@ -9,8 +9,11 @@ startPort: 12390
 models:
   qwen3.8-27b:
     name: "Qwen3.8-27B"
-    # 'env' sets the variable, and the presence of ${PORT} satisfies the validator
+    # Linux: 'env' sets the variable, and the script uses ${PORT:-12380}
     cmd: env PORT=${PORT} /home/yury/run_qwen3.8-27b.sh
+    # Windows: the script declares param([int]$Port) and receives the port
+    # as -Port ${PORT}
+    # cmd: powershell -NoProfile -ExecutionPolicy Bypass -File C:\run\run_qwen3.8-27b.ps1 -Port ${PORT}
     proxy: http://127.0.0.1:${PORT}
 
   ornith-1.5-9b:

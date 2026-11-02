@@ -14,6 +14,12 @@ llama-swappy only spawns the model command you give it and proxies HTTP.
 go build -o llama-swappy.exe .
 ```
 
+or use the helper scripts, which accept an optional output path:
+
+- Windows: `build.ps1` (default output `llama-swappy.exe`), e.g.
+  `.\build.ps1 -OutPath D:\some\dir\llama-swappy.exe`
+- Linux: `build.sh` (default output `llama-swappy`), e.g. `./build.sh /some/dir/llama-swappy`
+
 ## Run
 
 ```bash
@@ -135,14 +141,43 @@ Only `globalTTL`, `startPort`, and `models` (with per-model `name`, `cmd`,
 always replaced with
 `startPort` — the single active model always uses that port.
 
-### Windows note
+### Run scripts on Windows (PowerShell)
 
-`cmd` is executed as a plain command line without a shell. On Linux the
-example works as-is; on Windows provide an executable invocation, e.g.
+`cmd` is executed as a plain command line without a shell. On Windows use a
+PowerShell wrapper script that takes the port as a parameter:
 
 ```yaml
-cmd: cmd /c "set PORT=%PORT% & llama-server.exe ..."
+cmd: powershell -NoProfile -ExecutionPolicy Bypass -File C:\run\run_qwen3.8-27b.ps1 -Port ${PORT}
 ```
+
+The script declares `param([int]$Port = 12380)` and receives llama-swappy's
+assigned port as `-Port`; see `example/run_qwen3.8-27b.ps1` for the template.
+Do not hardcode the port in the script: it collides with the port
+llama-swappy itself listens on and prevents models from sharing `startPort`.
+
+### Metadata hints in run scripts
+
+llama-swappy derives `contextSize`, `slots`, `reasoning` and `maxTokens` for
+`/llama-swappy/info` by tokenizing every uncommented line of the run script.
+When the real flags are hidden inside another tool's config (e.g. a runner
+that stores `-c`/`-np` in its own data directory), declare them with a no-op
+line that the shell ignores but llama-swappy parses:
+
+```bash
+# bash: ':' is a no-op command that ignores its arguments
+: -c 115000 -np 1
+```
+
+```powershell
+# powershell: a stub function collects all arguments without binding
+function llama-swappy-metadata {}
+llama-swappy-metadata -c 115000 -np 1
+```
+
+Keep these values in sync with what the runner actually uses — they are
+declarations, not settings. Flag values in such hint lines must be literal
+numbers; anything the real script also sets explicitly is overridden by the
+last uncommented occurrence in the script.
 
 ## Behavior
 
