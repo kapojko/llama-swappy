@@ -126,8 +126,9 @@ endpoint itself (never proxied to a model; any other method gets 405):
 - `GET /llama-swappy/info` — JSON with the app `version`, the currently
   loaded model (`key`, `name`, `secondsToUnload` — remaining idle time
   from the same clock the unload monitor uses; `null` when nothing is
-  loaded) and every configured model (`key`, `name`, `input:
-  ["text"]` (hardcoded for now), plus derived fields; `contextSize` is
+  loaded) and every configured model (`key`, `name`, `input` —
+  `["text"]`, plus `"image"` when the run script declares an image
+  reader — plus derived fields; `contextSize` is
   the per-request context, `slots` the parallel slot count, both
   omitted when unknown). Intended for
   clients such as the pi agent to configure models automatically.
@@ -161,7 +162,10 @@ omitted when the flag is absent; llama-server's own default applies —
 a single slot on older builds, auto on newer ones),
 `reasoning` (`--reasoning on|off`, bare flag = on), and `maxTokens`
 (explicit per-model `maxTokens` config > script `--max-tokens` >
-`min(32768, contextSize/2)`). Because llama-server divides the total
+`min(32768, contextSize/2)`). `input` is derived from the image reader:
+`-mm`/`--mmproj` (llama-server with an mmproj file) or `--vision`
+(Strata, also accepting a device name or on/off) add `"image"` to
+`["text"]`. Because llama-server divides the total
 `-c` value equally among the parallel slots, `contextSize` is the
 per-request context (total/slots); for `np=1` models it is unchanged.
 (With `--kv-unified` llama-server may let a slot exceed its equal
@@ -174,7 +178,9 @@ metadata for runners that hide the real flags in their own config: bash
 `:` no-op arguments (`: -c 115000 -np 1`) and a PowerShell stub function
 (`llama-swappy-metadata -c 115000 -np 1`, defined as `function
 llama-swappy-metadata {}`) are both parsed as plain flags. Hint values
-must be literal numbers.
+must be literal numbers. A hint line can also declare an image reader
+(`--vision` for Strata, `-mm`/`--mmproj` for llama-server) when the
+real flag lives in the runner's own config file.
 
 ## Config
 

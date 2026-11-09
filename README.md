@@ -78,8 +78,11 @@ GET /llama-swappy/info
   Because llama-server divides the total `-c` value equally among the
   parallel slots, `contextSize` is the per-request context (total
   divided by `slots`); without `-np` llama-server's own default applies
-  (single slot on older builds, auto on newer ones). `input` is
-  currently hardcoded to `["text"]`. Fields that could not be derived
+  (single slot on older builds, auto on newer ones). `input` lists the
+  modalities the model accepts: `["text"]`, plus `"image"` when the
+  run script declares an image reader — llama-server's `-mm`/`--mmproj`
+  (an mmproj file) or a runner's `--vision` (Strata: bare, a device
+  name, or on/off). Fields that could not be derived
   (script missing, not a text file, flag absent) are omitted.
 - `GET /v1/models` returns the standard OpenAI model list with the
   configured model keys.
@@ -157,8 +160,9 @@ llama-swappy itself listens on and prevents models from sharing `startPort`.
 
 ### Metadata hints in run scripts
 
-llama-swappy derives `contextSize`, `slots`, `reasoning` and `maxTokens` for
-`/llama-swappy/info` by tokenizing every uncommented line of the run script.
+llama-swappy derives `contextSize`, `slots`, `reasoning`, `maxTokens`
+and whether the model reads images (`input`) for `/llama-swappy/info` by
+tokenizing every uncommented line of the run script.
 When the real flags are hidden inside another tool's config (e.g. a runner
 that stores `-c`/`-np` in its own data directory), declare them with a no-op
 line that the shell ignores but llama-swappy parses:
@@ -177,7 +181,10 @@ llama-swappy-metadata -c 115000 -np 1
 Keep these values in sync with what the runner actually uses — they are
 declarations, not settings. Flag values in such hint lines must be literal
 numbers; anything the real script also sets explicitly is overridden by the
-last uncommented occurrence in the script.
+last uncommented occurrence in the script. A hint line can also declare an
+image reader when the real flag lives in the runner's own config, e.g.
+`llama-swappy-metadata --vision` for Strata or
+`llama-swappy-metadata -mm "$MMPROJ"` for llama-server.
 
 ## Behavior
 

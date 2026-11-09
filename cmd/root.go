@@ -79,6 +79,9 @@ func run(ctx context.Context, cfgPath, listen string) error {
 		if info.Reasoning != nil {
 			attrs = append(attrs, "reasoning", *info.Reasoning)
 		}
+		if info.Vision != nil {
+			attrs = append(attrs, "vision", *info.Vision)
+		}
 		log.Info("model metadata", attrs...)
 	}
 	mgr := model.New(cfg, model.Options{Logger: log, Out: os.Stdout})

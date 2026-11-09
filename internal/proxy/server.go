@@ -200,6 +200,16 @@ type infoResponse struct {
 	Models  []modelInfo   `json:"models"`
 }
 
+// modelInput reports the modalities a model accepts: text, plus image
+// when its run script declares an image reader (-mm/--mmproj for
+// llama-server, --vision for Strata).
+func modelInput(info inspect.Info) []string {
+	if info.Vision != nil && *info.Vision {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
+}
+
 // serveInfo answers GET InfoPath with the app version, the loaded model
 // (with its remaining idle time) and all configured models.
 func (s *Server) serveInfo(w http.ResponseWriter) {
@@ -214,7 +224,7 @@ func (s *Server) serveInfo(w http.ResponseWriter) {
 	sort.Strings(keys)
 	for _, key := range keys {
 		def := s.cfg.Models[key]
-		mi := modelInfo{Key: key, Name: def.Name, Input: []string{"text"}}
+		mi := modelInfo{Key: key, Name: def.Name, Input: modelInput(s.infos[key])}
 		mi.ContextSize = s.infos[key].ContextSize
 		mi.Slots = s.infos[key].Slots
 		mi.Reasoning = s.infos[key].Reasoning

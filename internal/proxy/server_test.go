@@ -338,10 +338,10 @@ func TestLlamaPrefixWhitelist(t *testing.T) {
 	defer ts.Close()
 
 	for _, path := range []string{
-		LlamaPathPrefix + "/completion",   // native llama-server route, not whitelisted
-		LlamaPathPrefix + "/props",        // native llama-server route, not whitelisted
-		LlamaPathPrefix + "/health",       // readiness is handled by the manager itself
-		LlamaPathPrefix,                  // bare prefix
+		LlamaPathPrefix + "/completion",     // native llama-server route, not whitelisted
+		LlamaPathPrefix + "/props",          // native llama-server route, not whitelisted
+		LlamaPathPrefix + "/health",         // readiness is handled by the manager itself
+		LlamaPathPrefix,                     // bare prefix
 		LlamaPathPrefix + "/tokenize/extra", // near-miss
 	} {
 		resp, err := http.Post(ts.URL+path, "application/json", bytes.NewReader([]byte(`{"model":"m1"}`)))
@@ -385,7 +385,7 @@ func TestInfoEndpointNoModelLoaded(t *testing.T) {
 	infos := map[string]inspect.Info{
 		// ContextSize is already per-request (total / slots) and Slots
 		// is as parsed from the run script by internal/inspect.
-		"m1": {ContextSize: 36864, Slots: 4, Reasoning: boolPtr(true)},
+		"m1": {ContextSize: 36864, Slots: 4, Reasoning: boolPtr(true), Vision: boolPtr(true)},
 		// m2 has no entry: its script failed to parse at startup.
 	}
 	srv, _, _ := newTestServer(t, be, time.Minute, infos)
@@ -423,14 +423,19 @@ func TestInfoEndpointNoModelLoaded(t *testing.T) {
 	if m1["reasoning"] != true {
 		t.Errorf("m1.reasoning = %v, want true", m1["reasoning"])
 	}
-	if _, present := m1["input"]; !present {
-		t.Error("m1.input missing")
+	if got, ok := m1["input"].([]any); !ok || len(got) != 2 || got[0] != "text" || got[1] != "image" {
+		t.Errorf("m1.input = %v, want [text image] (image reader declared)", m1["input"])
 	}
 	m2 := models[1].(map[string]any)
 	for _, field := range []string{"contextSize", "slots", "maxTokens", "reasoning"} {
 		if _, present := m2[field]; present {
 			t.Errorf("m2.%s = %v, want omitted (parse failed)", field, m2[field])
 		}
+	}
+	// A model without a declared image reader accepts text only; the
+	// field is always present.
+	if got, ok := m2["input"].([]any); !ok || len(got) != 1 || got[0] != "text" {
+		t.Errorf("m2.input = %v, want [text]", m2["input"])
 	}
 }
 

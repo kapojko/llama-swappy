@@ -1,8 +1,8 @@
 // Package inspect derives static metadata about a model (context size,
-// max output tokens, reasoning support) from its run script or command
-// line. The metadata is logged at startup and reported by the
-// /llama-swappy/info endpoint so clients (e.g. the pi agent) can
-// configure the model automatically.
+// max output tokens, reasoning and image input support) from its run
+// script or command line. The metadata is logged at startup and
+// reported by the /llama-swappy/info endpoint so clients (e.g. the pi
+// agent) can configure the model automatically.
 package inspect
 
 import (
@@ -38,6 +38,11 @@ type Info struct {
 	// Reasoning is set when the script configures --reasoning; nil
 	// means the flag is absent.
 	Reasoning *bool
+	// Vision is set when the script declares an image reader:
+	// llama-server's -mm/--mmproj (an mmproj file) or a runner's
+	// --vision (Strata: bare, a device name, or on/off). nil means no
+	// image support was declared.
+	Vision *bool
 }
 
 // MaxTokens resolves the per-response output token limit for a model:
@@ -261,6 +266,28 @@ func applyFlags(tokens []string, info *Info) {
 				// without a value as on.
 				b := true
 				info.Reasoning = &b
+			}
+		case "-mm", "--mmproj":
+			// An mmproj file makes llama-server read images. The
+			// value is usually a variable ($mmprojPath), so the
+			// flag alone counts; --mmproj-offload is a different
+			// flag and does not name an image reader by itself.
+			b := true
+			info.Vision = &b
+		case "--vision":
+			// Strata's image reader: bare (on), an explicit on/off
+			// value, or a device name such as "--vision cpu".
+			switch {
+			case hasVal:
+				if b, ok := parseBool(val); ok {
+					info.Vision = &b
+				} else {
+					b := true
+					info.Vision = &b
+				}
+			default:
+				b := true
+				info.Vision = &b
 			}
 		}
 	}

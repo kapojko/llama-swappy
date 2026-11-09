@@ -71,6 +71,9 @@ func TestInspectBashScript(t *testing.T) {
 	if info.MaxTokens != 0 {
 		t.Errorf("MaxTokens = %d, want 0 (not set in script)", info.MaxTokens)
 	}
+	if info.Vision != nil {
+		t.Errorf("Vision = %v, want nil (no mmproj flag)", *info.Vision)
+	}
 }
 
 func TestInspectCRLFLineEndings(t *testing.T) {
@@ -269,5 +272,126 @@ func TestMaxTokensResolution(t *testing.T) {
 				t.Errorf("MaxTokens = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestInspectVisionFromMmproj(t *testing.T) {
+	// An mmproj file makes llama-server read images. The value is a
+	// variable, and --mmproj-offload next to it must not confuse the
+	// parsing.
+	script := "#!/bin/bash\n" +
+		"MMPROJ=\"$HOME/models/mmproj-BF16.gguf\"\n" +
+		"llama-server -m model.gguf -mm \"$MMPROJ\" --mmproj-offload\n"
+	path := writeFile(t, "run.sh", script)
+	info, err := Inspect(path, 0)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Vision == nil || !*info.Vision {
+		t.Errorf("Vision = %v, want true (-mm)", info.Vision)
+	}
+}
+
+func TestInspectVisionPowerShellMmproj(t *testing.T) {
+	// PowerShell array syntax: '-mm', $mmprojPath
+	ps1 := `$mmprojPath = 'D:\Models\mmproj-BF16.gguf'
+$serverArgs = @(
+    '-m', $modelPath
+    '-mm', $mmprojPath
+    '--mmproj-offload'
+)
+`
+	path := writeFile(t, "run.ps1", ps1)
+	info, err := Inspect("powershell -File "+path, 0)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Vision == nil || !*info.Vision {
+		t.Errorf("Vision = %v, want true (-mm)", info.Vision)
+	}
+}
+
+func TestInspectVisionMmprojEqualsForm(t *testing.T) {
+	path := writeFile(t, "run.sh", "#!/bin/bash\nllama-server -m model.gguf --mmproj=/models/mmproj.gguf\n")
+	info, err := Inspect(path, 0)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Vision == nil || !*info.Vision {
+		t.Errorf("Vision = %v, want true (--mmproj=...)", info.Vision)
+	}
+}
+
+func TestInspectNoMmprojFlag(t *testing.T) {
+	// --mmproj-offload alone does not name an image reader, and a
+	// commented-out -mm must be ignored.
+	script := "#!/bin/bash\n" +
+		"#llama-server -mm \"$MMPROJ\"\n" +
+		"llama-server -m model.gguf --mmproj-offload\n"
+	path := writeFile(t, "run.sh", script)
+	info, err := Inspect(path, 0)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Vision != nil {
+		t.Errorf("Vision = %v, want nil", *info.Vision)
+	}
+}
+
+func TestInspectVisionStrataPseudoCommand(t *testing.T) {
+	// Strata keeps its engine flags in its own JSON config, so a
+	// launcher declares image support with a no-op hint line.
+	script := "# run_qwen3.8-flash-next_strata.ps1\n" +
+		"function llama-swappy-metadata {}\n" +
+		"llama-swappy-metadata -c 204800 -np 1 --reasoning on --vision\n" +
+		"& $python $server --engine strata --config $config --port $Port\n"
+	path := writeFile(t, "run.ps1", script)
+	info, err := Inspect("powershell -File "+path, 12390)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.ContextSize != 204800 {
+		t.Errorf("ContextSize = %d, want 204800", info.ContextSize)
+	}
+	if info.Vision == nil || !*info.Vision {
+		t.Errorf("Vision = %v, want true (hint line)", info.Vision)
+	}
+}
+
+func TestInspectVisionStrataDevice(t *testing.T) {
+	// Strata accepts a device name after --vision ("cpu", "cuda:1").
+	path := writeFile(t, "run.sh", "#!/bin/bash\npython serve/server.py --engine strata --vision cpu\n")
+	info, err := Inspect(path, 0)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Vision == nil || !*info.Vision {
+		t.Errorf("Vision = %v, want true (--vision cpu)", info.Vision)
+	}
+}
+
+func TestInspectVisionStrataOff(t *testing.T) {
+	// Strata's "--vision no" turns the image reader off: the last
+	// uncommented occurrence wins.
+	script := "#!/bin/bash\n" +
+		"python serve/server.py --engine strata --vision\n" +
+		"python serve/server.py --engine strata --vision no\n"
+	path := writeFile(t, "run.sh", script)
+	info, err := Inspect(path, 0)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Vision == nil || *info.Vision {
+		t.Errorf("Vision = %v, want false (--vision no)", info.Vision)
+	}
+}
+
+func TestInspectVisionDirectCommandLine(t *testing.T) {
+	info, err := Inspect(`llama-server -m model.gguf --mmproj /models/mmproj.gguf -c 8192`, 12390)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.Vision == nil || !*info.Vision {
+		t.Errorf("Vision = %v, want true (--mmproj on the cmd line)", info.Vision)
 	}
 }
