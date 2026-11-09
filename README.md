@@ -198,7 +198,8 @@ image reader when the real flag lives in the runner's own config, e.g.
   streamed back.
 - **Idle unload**: if no requests arrive for `globalTTL` seconds, the model
   is stopped (on Unix: SIGTERM to its whole process group, escalating to
-  SIGKILL after a 10s grace; on Windows: the direct child is killed).
+  SIGKILL after a 10s grace; on Windows: the whole process tree is
+  terminated via a job object).
 - **Crash recovery / failed-start retry**: if the model process exits
   unexpectedly (e.g. segfault), or a start fails (spawn error, exit or
   timeout during readiness), the model is cleared and auto-restarted
@@ -219,10 +220,13 @@ image reader when the real flag lives in the runner's own config, e.g.
   (the wrapper script and everything it spawns), waiting 10s before
   escalating to SIGKILL — so a plain wrapper script is stopped
   completely, and the server gets its clean-exit path on SIGTERM. On
-  Windows only the direct child is killed; use a direct executable
-  invocation there. A grandchild that leaves the process group (e.g.
-  via `setsid` or daemonizing) is not stopped. The unload wait is
-  bounded (30s), so this cannot hang the process.
+  Windows the whole tree is terminated through a kill-on-close job
+  object: everything the direct child spawns joins the job, and the
+  tree also dies if llama-swappy itself exits without unloading. What
+  is *not* stopped is a grandchild that deliberately escapes — one that
+  leaves the process group (e.g. via `setsid` or daemonizing) on Unix,
+  or breaks out of the job (`CREATE_BREAKAWAY_FROM_JOB`) on Windows.
+  The unload wait is bounded (30s), so this cannot hang the process.
 - Requests arrive at the proxy URL, not the model port; port conflicts with
   other services on `startPort` are not detected ahead of time.
 - If an upstream failure happens after the response has already started

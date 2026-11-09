@@ -45,6 +45,14 @@ func (ProcessStarter) Start(cmd string, out io.Writer) (Handle, error) {
 		done:     make(chan error, 1),
 		finished: make(chan struct{}),
 	}
+	// Platform setup runs before the child has a chance to spawn
+	// descendants of its own (Windows: the child is still suspended and
+	// joins a kill-on-close job here; see process_windows.go).
+	if err := h.attach(); err != nil {
+		_ = c.Process.Kill()
+		h.release()
+		return nil, fmt.Errorf("start model process: %w", err)
+	}
 	// The single reaper: exactly one goroutine calls exec.Cmd.Wait, so
 	// the exit error is produced once and consumed idempotently by both
 	// Kill and Wait. finished is a pure observation channel (closing it
@@ -53,6 +61,7 @@ func (ProcessStarter) Start(cmd string, out io.Writer) (Handle, error) {
 		err := c.Wait()
 		h.done <- err
 		close(h.finished)
+		h.release()
 	}()
 	return h, nil
 }
@@ -93,6 +102,11 @@ type procHandle struct {
 	cmd      *exec.Cmd
 	done     chan error
 	finished chan struct{}
+
+	// job is the Windows kill-on-close job object handle wrapping the
+	// model's whole process tree (0 on other platforms; see
+	// process_windows.go).
+	job uintptr
 
 	mu     sync.Mutex
 	res    error

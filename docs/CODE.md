@@ -62,8 +62,9 @@ mid-stream, since the timer is only refreshed when a response completes.
   `example/run_qwen3.8-27b.ps1`).
 - Unloading stops the model's whole process group on Unix (SIGTERM,
   escalating to SIGKILL after a 10s grace), which covers wrapper scripts
-  that spawn the server; on Windows only the direct child is killed
-   (see README limitations). `Wait` is bounded by `WaitDelay` (30s), so a
+  that spawn the server; on Windows the tree is terminated via a
+  kill-on-close job object the child joins while still suspended
+  (see README limitations). `Wait` is bounded by `WaitDelay` (30s), so a
     process that keeps the stdout pipe open cannot hang the unload. A
     termination exit (signal or non-zero code) is the expected outcome of
     stopping the model: both the `Kill` result and the `Wait` result in

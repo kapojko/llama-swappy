@@ -18,6 +18,14 @@ func sysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true}
 }
 
+// attach is a no-op on Unix: sysProcAttr already put the child in its
+// own process group, which covers the whole tree for Kill.
+func (h *procHandle) attach() error { return nil }
+
+// release is a no-op on Unix (the job object is a Windows-only resource,
+// see process_windows.go).
+func (h *procHandle) release() {}
+
 // Kill sends SIGTERM to the model's entire process group and waits up
 // to termGrace for the reaper to report the exit, escalating to SIGKILL
 // on the group if anything survives. It returns the reaper result, so a

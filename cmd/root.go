@@ -49,11 +49,14 @@ func Execute() error {
 }
 
 func run(ctx context.Context, cfgPath, listen string) error {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Version first, so logs from a long-running instance (or a bug
+	// report) always say which build produced them.
+	log.Info("llama-swappy version", "version", Version)
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	// Parse each model's run script up front so the metadata is logged
 	// at startup and available for /llama-swappy/info. A model whose
 	// script cannot be read is still usable; it is just reported without
