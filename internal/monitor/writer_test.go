@@ -57,6 +57,20 @@ func TestWriterRollsPerDayAndDeletesOld(t *testing.T) {
 	}
 }
 
+func TestWriterCreatesMissingDir(t *testing.T) {
+	// A logDir that does not exist yet — including parents — is
+	// created on the first write.
+	dir := filepath.Join(t.TempDir(), "deeply", "nested", "logs")
+	w := newLogWriter(dir, 7, testLogger())
+	defer w.close()
+	if err := w.write(ModelEvent{Type: ModelLoadedType, TS: time.Now(), Model: "m1"}); err != nil {
+		t.Fatalf("write into a missing dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "monitor-"+time.Now().Format("2006-01-02")+".jsonl")); err != nil {
+		t.Fatalf("log file not created: %v", err)
+	}
+}
+
 func TestWriterRecentFiles(t *testing.T) {
 	dir := t.TempDir()
 	w := newLogWriter(dir, 7, testLogger())
