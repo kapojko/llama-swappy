@@ -123,7 +123,7 @@ func newTestServer(t *testing.T, backend *httptest.Server, ttl time.Duration, in
 		PollInterval: 20 * time.Millisecond,
 	})
 	t.Cleanup(mgr.Close)
-	return New(cfg, mgr, log, infos), mgr, fs
+	return New(cfg, mgr, log, infos, nil), mgr, fs
 }
 
 func getJSON(t *testing.T, url string) (int, map[string]any) {
@@ -569,3 +569,34 @@ func TestModelsEndpoint(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func TestMonitorEndpointDisabled(t *testing.T) {
+	be := backend(t)
+	defer be.Close()
+	srv, _, _ := newTestServer(t, be, time.Minute, nil)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// The endpoint is always registered; with monitoring disabled it
+	// answers 200 with an explicit enabled=false so consumers can tell
+	// "monitoring off" from a missing endpoint.
+	code, body := getJSON(t, ts.URL+"/llama-swappy/monitor")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if body["enabled"] != false {
+		t.Errorf("enabled = %v, want false", body["enabled"])
+	}
+	if reason, _ := body["reason"].(string); reason == "" {
+		t.Error("reason is empty")
+	}
+
+	resp, err := http.Post(ts.URL+"/llama-swappy/monitor", "application/json", bytes.NewReader([]byte(`{}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("POST monitor: status = %d, want 405", resp.StatusCode)
+	}
+}

@@ -53,7 +53,22 @@ type Options struct {
 	ReadyTimeout time.Duration
 	PollInterval time.Duration
 	RestartDelay time.Duration
+	// OnEvent, when set, is notified of model lifecycle transitions
+	// with one of the Event* actions. It is called synchronously from
+	// the manager's goroutines while its mutex is held, so a callback
+	// must not call back into the Manager (the monitor uses it to log
+	// model loads/unloads next to its hardware samples).
+	OnEvent func(action, key string)
 }
+
+// Model lifecycle actions passed to Options.OnEvent.
+const (
+	// EventLoaded is emitted once a model has become ready to serve.
+	EventLoaded = "loaded"
+	// EventUnloaded is emitted when the active model is gone: idle
+	// unload, swap-out, manual unload, crash or shutdown.
+	EventUnloaded = "unloaded"
+)
 
 // active tracks the currently loaded model. At most one model is
 // loaded at a time; a request for another model "swaps" it in.
@@ -77,6 +92,7 @@ type Manager struct {
 	readyTimeout time.Duration
 	poll         time.Duration
 	restartDelay time.Duration
+	onEvent      func(action, key string)
 
 	mu           sync.Mutex
 	cur          *active
@@ -133,6 +149,7 @@ func New(cfg *config.Config, opts Options) *Manager {
 		readyTimeout: ready,
 		poll:         poll,
 		restartDelay: restart,
+		onEvent:      opts.OnEvent,
 		crashLoops:   map[string]int{},
 		ctx:          ctx,
 		cancel:       cancel,
@@ -194,8 +211,16 @@ func (m *Manager) startLocked(key string) (string, error) {
 	m.cur = a
 	m.lastActive = time.Now()
 	m.log.Info("model ready", "model", key, "proxy", proxyURL)
+	m.emitEvent(EventLoaded, key)
 	go m.watch(a)
 	return proxyURL, nil
+}
+
+// emitEvent notifies the optional lifecycle listener.
+func (m *Manager) emitEvent(action, key string) {
+	if m.onEvent != nil {
+		m.onEvent(action, key)
+	}
 }
 
 // Current returns the key of the loaded model, or "" if none.
@@ -299,6 +324,7 @@ func (m *Manager) stopLocked() {
 	if err := stopErr(a.handle.Wait()); err != nil {
 		m.log.Warn("wait model failed", "model", key, "err", err)
 	}
+	m.emitEvent(EventUnloaded, key)
 }
 
 // watch observes the model process. On an unexpected exit it clears the
@@ -315,6 +341,7 @@ func (m *Manager) watch(a *active) {
 	}
 	m.log.Error("model exited unexpectedly", "model", a.key, "uptime", time.Since(a.startedAt), "err", err)
 	m.cur = nil
+	m.emitEvent(EventUnloaded, a.key)
 	if a.served {
 		delete(m.crashLoops, a.key)
 	}

@@ -118,6 +118,69 @@ func TestLoadExampleFile(t *testing.T) {
 	}
 }
 
+func TestValidateMonitor(t *testing.T) {
+	validCfg := func() *Config {
+		return &Config{
+			GlobalTTL: 900,
+			StartPort: 12390,
+			Models: map[string]Model{
+				"m1": {Name: "M", Cmd: "c", Proxy: "http://127.0.0.1:${PORT}"},
+			},
+		}
+	}
+	base := func() *MonitorConfig {
+		return &MonitorConfig{Enabled: true, LogDir: filepath.Join(t.TempDir(), "logs")}
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*MonitorConfig)
+		wantErr string
+	}{
+		{"bad interval", func(m *MonitorConfig) { m.Interval = "five" }, "interval"},
+		{"zero interval", func(m *MonitorConfig) { m.Interval = "0s" }, "interval"},
+		{"relative logDir", func(m *MonitorConfig) { m.LogDir = "logs" }, "logDir"},
+		{"negative retention", func(m *MonitorConfig) { m.RetentionDays = -1 }, "retentionDays"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg()
+			c.Monitor = base()
+			tc.mutate(c.Monitor)
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Validate() = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+	// A disabled or absent section is always valid, whatever it says.
+	for _, m := range []*MonitorConfig{nil, {Enabled: false, Interval: "garbage"}} {
+		c := validCfg()
+		c.Monitor = m
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate() with monitor %v = %v, want nil", m, err)
+		}
+	}
+}
+
+func TestLoadMonitorSection(t *testing.T) {
+	logDir := filepath.Join(t.TempDir(), "monitor-logs")
+	yaml := validYAML + `
+monitor:
+  enabled: true
+  logDir: ` + logDir + `
+  interval: 5s
+  retentionDays: 14
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Monitor == nil || !c.Monitor.Enabled || c.Monitor.LogDir != logDir ||
+		c.Monitor.Interval != "5s" || c.Monitor.RetentionDays != 14 {
+		t.Fatalf("Monitor = %+v", c.Monitor)
+	}
+}
+
 func TestLoadMaxTokensOverride(t *testing.T) {
 	yaml := strings.Replace(validYAML, "    proxy: http://127.0.0.1:${PORT}\n  m2:",
 		"    proxy: http://127.0.0.1:${PORT}\n    maxTokens: 4096\n  m2:", 1)

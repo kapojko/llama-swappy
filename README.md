@@ -97,6 +97,69 @@ GET /llama-swappy/info
   `unloaded` is `null` when no model was loaded. Handy to free VRAM on
   demand, e.g. `curl -X POST http://127.0.0.1:12380/llama-swappy/unload`.
 
+## Hardware monitoring (optional)
+
+An optional heartbeat sampler modeled after the strata-monitor box
+heartbeat monitors 0-N GPUs, the CPU, RAM
+and all NVMe devices, and (when a `logDir` is configured) writes one
+JSONL line per sample plus `model_loaded`/`model_unloaded` records to
+`monitor-YYYY-MM-DD.jsonl` — so the hardware timeline and the model
+timeline share one file that survives crashes (every line is synced to
+disk). It is fully opt-in: without an enabled `monitor` section in the
+config no hardware is accessed at all.
+
+```yaml
+monitor:
+  enabled: true
+  logDir: /var/log/llama-swappy   # optional; no logs without it
+  interval: 5s                    # default 5s
+  retentionDays: 7                # default 7
+```
+
+Per platform, the data sources are the cheap ones: NVML
+(`nvml.dll`/`libnvidia-ml`, loaded lazily — never touched without an
+NVIDIA driver, never touched at all when monitoring is disabled) for
+NVIDIA GPUs on Windows, and plain sysfs reads for AMD GPUs on Linux
+(the amdgpu driver publishes temperatures, fan, power, utilization,
+VRAM and DPM clocks as files — no process is spawned and the
+multi-query `amd-smi` interface is deliberately never used). CPU
+utilization comes from the kernel CPU-time counters, RAM from the
+OS memory status, NVMe throughput from the kernel disk counters.
+Values a platform or driver does not offer are simply omitted (e.g.
+CPU temperature and NVMe temperatures on Windows without elevation).
+
+```GET /llama-swappy/monitor``` answers (always registered — with
+monitoring disabled it returns `200` with `{"enabled":false,
+"reason":"..."}`, so consumers can tell "monitoring off" from "old
+app without the endpoint"):
+
+```json
+{
+  "enabled": true,
+  "now": { "ts": "...", "gpus": [...], "cpu": {...}, "ram": {...},
+           "nvmes": [...], "model": "idle" },
+  "avgMinute": { ... },
+  "maxDay": { ... },
+  "maxWeek": { ... },
+  "historyAvailable": true
+}
+```
+
+`now` is the newest sample, `avgMinute` the average over the last
+minute (in memory), `maxDay`/`maxWeek` the maxima over today's log
+file and the last seven files (omitted when logging is not
+configured). GPU samples are paired by index and NVMe samples by
+name across samples, so 0-N devices are tracked individually. Fields:
+per GPU — temperature(s), utilization %, VRAM used/total MiB, power W,
+fan (rpm on AMD, % on NVIDIA), core/memory clock current/max MHz (the
+pair is the throttle witness); CPU — utilization %, temperature;
+RAM — used/total and swap used/total MiB; per NVMe — temperature,
+read/write B/s.
+
+A probe failure never stops the sampler — the affected field is
+omitted for that sample, and a permanently unavailable value is
+logged once, not once per sample.
+
 ## Native llama-server endpoints (`/llama/...`)
 
 A small set of native llama-server endpoints is exposed under the
@@ -132,6 +195,13 @@ globalTTL: 900
 # Port the active model's llama-server listens on (${PORT} is substituted)
 startPort: 12390
 
+# Optional hardware monitoring (see "Hardware monitoring")
+monitor:
+  enabled: true
+  logDir: /var/log/llama-swappy
+  interval: 5s
+  retentionDays: 7
+
 models:
   qwen3.8-27b:
     name: "Qwen3.8-27B"
@@ -139,8 +209,9 @@ models:
     proxy: http://127.0.0.1:${PORT}
 ```
 
-Only `globalTTL`, `startPort`, and `models` (with per-model `name`, `cmd`,
-`proxy` and optional `maxTokens`) are supported. `${PORT}` in `proxy` is
+`globalTTL`, `startPort`, `models` (with per-model `name`, `cmd`,
+`proxy` and optional `maxTokens`) and the optional `monitor` section
+are supported. `${PORT}` in `proxy` is
 always replaced with
 `startPort` — the single active model always uses that port.
 
@@ -248,3 +319,11 @@ self-description endpoints with real run-script fixtures.
 On Windows the Unix-only end-to-end test is re-run inside the default
 WSL distro (needs a modern Go toolchain in `$HOME/sdk/go`; skipped if
 unavailable).
+
+The monitor backends additionally have opt-in hardware tests, skipped
+unless `LLAMA_SWAPPY_E2E=1` is set, so the normal suite stays hermetic:
+
+```bash
+# Windows (NVIDIA/NVML, CPU/RAM, NVMe) or Linux/WSL (proc, sysfs):
+LLAMA_SWAPPY_E2E=1 go test ./internal/monitor -run E2E -v
+```

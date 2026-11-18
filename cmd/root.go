@@ -17,6 +17,7 @@ import (
 	"llama-swappy/internal/config"
 	"llama-swappy/internal/inspect"
 	"llama-swappy/internal/model"
+	"llama-swappy/internal/monitor"
 	"llama-swappy/internal/proxy"
 )
 
@@ -87,9 +88,21 @@ func run(ctx context.Context, cfgPath, listen string) error {
 		}
 		log.Info("model metadata", attrs...)
 	}
-	mgr := model.New(cfg, model.Options{Logger: log, Out: os.Stdout})
+	// The monitor is fully optional: when the config has no enabled
+	// monitor section, monitor.New returns nil and no hardware is
+	// touched at all. ModelEvent is nil-safe, so the manager wiring is
+	// the same either way.
+	mon, err := monitor.New(cfg.Monitor, log)
+	if err != nil {
+		return fmt.Errorf("monitor: %w", err)
+	}
+	if mon != nil {
+		defer mon.Stop()
+		mon.Start()
+	}
+	mgr := model.New(cfg, model.Options{Logger: log, Out: os.Stdout, OnEvent: mon.ModelEvent})
 	defer mgr.Close()
-	server := proxy.New(cfg, mgr, log, infos)
+	server := proxy.New(cfg, mgr, log, infos, mon)
 
 	httpSrv := &http.Server{Addr: listen, Handler: server}
 	errCh := make(chan error, 1)

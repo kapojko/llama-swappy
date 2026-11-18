@@ -15,6 +15,7 @@ import (
 	"llama-swappy/internal/config"
 	"llama-swappy/internal/inspect"
 	"llama-swappy/internal/model"
+	"llama-swappy/internal/monitor"
 	"llama-swappy/internal/version"
 )
 
@@ -30,6 +31,13 @@ const ModelsPath = "/v1/models"
 // UnloadPath is the control endpoint that unloads the currently loaded
 // model on demand (POST only), without stopping the proxy itself.
 const UnloadPath = "/llama-swappy/unload"
+
+// MonitorPath is the hardware monitoring endpoint (GET only). It is
+// always registered, even when monitoring is disabled in the config:
+// it then answers 200 with {"enabled":false,"reason":...} so a
+// downstream consumer can tell "monitoring off" from "old app without
+// the endpoint".
+const MonitorPath = "/llama-swappy/monitor"
 
 // LlamaPathPrefix is the namespace under which selected native
 // llama-server endpoints are exposed: /llama/<path> is forwarded to the
@@ -58,19 +66,22 @@ type Server struct {
 	mgr   *model.Manager
 	log   *slog.Logger
 	infos map[string]inspect.Info
+	mon   *monitor.Monitor
 }
 
 // New creates the proxy Server. infos holds the metadata parsed at
 // startup from each model's run script; keys whose scripts could not be
-// parsed are absent and are reported without those fields.
-func New(cfg *config.Config, mgr *model.Manager, log *slog.Logger, infos map[string]inspect.Info) *Server {
+// parsed are absent and are reported without those fields. mon is the
+// optional hardware monitor; nil means monitoring is disabled in the
+// config and the monitor endpoint reports that.
+func New(cfg *config.Config, mgr *model.Manager, log *slog.Logger, infos map[string]inspect.Info, mon *monitor.Monitor) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	if infos == nil {
 		infos = map[string]inspect.Info{}
 	}
-	return &Server{cfg: cfg, mgr: mgr, log: log, infos: infos}
+	return &Server{cfg: cfg, mgr: mgr, log: log, infos: infos, mon: mon}
 }
 
 type apiError struct {
@@ -114,6 +125,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.serveUnload(w)
+		return
+	case MonitorPath:
+		if r.Method != http.MethodGet {
+			s.writeError(w, http.StatusMethodNotAllowed, "use GET")
+			return
+		}
+		s.serveMonitor(w)
 		return
 	}
 	// Requests under LlamaPathPrefix are forwarded to the target model's
@@ -265,6 +283,22 @@ func (s *Server) serveUnload(w http.ResponseWriter) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// serveMonitor answers GET MonitorPath with the hardware monitoring
+// status: current values, last-minute averages, daily and weekly
+// maxima. When monitoring is disabled the response says so explicitly
+// (still 200) so consumers can distinguish the states.
+func (s *Server) serveMonitor(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.mon == nil {
+		_ = json.NewEncoder(w).Encode(monitor.Status{
+			Enabled: false,
+			Reason: "monitoring is disabled in config",
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(s.mon.Status())
 }
 
 // openAIModel is one entry of the GET ModelsPath list.

@@ -6,6 +6,18 @@ globalTTL: 1800
 # Start assigning ports from 12390 (llama-server instances)
 startPort: 12390
 
+# Optional hardware monitoring: samples GPUs (0-N), CPU, RAM and NVMe
+# devices every `interval`, writes JSONL logs to `logDir` (one file per
+# day, old files deleted after `retentionDays`) and serves
+# GET /llama-swappy/monitor. Absent or enabled: false means no hardware
+# access at all. logDir is optional: without it the endpoint still
+# serves live data, but nothing is written to disk.
+#monitor:
+#  enabled: true
+#  logDir: /var/log/llama-swappy
+#  interval: 5s
+#  retentionDays: 7
+
 models:
   qwen3.8-27b:
     name: "Qwen3.8-27B"

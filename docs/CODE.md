@@ -140,6 +140,15 @@ endpoint itself (never proxied to a model; any other method gets 405):
   running and the next request restarts the model). Answers with the
   key of the stopped model as `unloaded`, or `null` when nothing was
   loaded.
+- `GET /llama-swappy/monitor` — the hardware monitoring status (see
+  below). Always registered: with monitoring disabled it answers
+  `200` with `{"enabled":false,"reason":"monitoring is disabled in
+  config"}`, so a consumer can tell "new app, monitoring off" from
+  "old app without the endpoint". When enabled it serves `now` (the
+  newest sample), `avgMinute` (average of the in-memory ring, last 60s),
+  `maxDay` and `maxWeek` (maxima over today's log file / the last seven
+  files; omitted when logging is not configured or holds no samples
+  yet), and `historyAvailable`.
 - `POST /llama/<path>` — forwards select native llama-server endpoints
   (`tokenize`, `detokenize`, `apply-template`) to the target model's
   llama-server with the prefix stripped; the whitelist is the
@@ -183,16 +192,95 @@ must be literal numbers. A hint line can also declare an image reader
 (`--vision` for Strata, `-mm`/`--mmproj` for llama-server) when the
 real flag lives in the runner's own config file.
 
+## Hardware monitoring (optional)
+
+The `monitor` config section (absent or `enabled: false` by default —
+when disabled, no hardware is accessed at all) starts a heartbeat
+sampler in `internal/monitor`: one sample per `interval` (default 5s)
+of all GPUs (0-N), CPU, RAM and all NVMe devices. The design follows
+the strata-monitor fail-safe doctrine: a probe failure never kills
+the sampler — the affected field is omitted for that sample, and a
+permanently unavailable value is logged once, not once per sample
+(backends also run behind a `recover` guard).
+
+**Backends** (each in its own file, selected per platform at
+construction — `newGPUSources`/`newSystemSource`/`newNVMeSource`):
+
+- `gpu_nvml_windows.go` — NVIDIA via NVML on Windows. A thin
+  `syscall.NewLazyDLL("nvml.dll")` wrapper of the ~12 flat C functions
+  needed (the Go equivalent of what pynvml does via ctypes). The DLL is
+  only touched when the backend is constructed, so machines without
+  an NVIDIA driver never load it. VRAM uses `nvmlDeviceGetMemoryInfo_v2`
+  (its `used` field matches nvidia-smi's `memory.used`; the v1 struct
+  is `{total, free, used}` and its `used` also counts driver-reserved
+  memory) with a v1 fallback for older drivers. NVML reports fan speed
+  in percent (no RPM query exists), hence `fanPct` vs the AMD `fanRpm`.
+- `gpu_amd_linux.go` — AMD via sysfs on Linux, ported from
+  strata-monitor.sh: the amdgpu hwmon temperatures (edge/junction/mem),
+  fan RPM, microwatt power, `gpu_busy_percent`, `mem_info_vram_*` and
+  the `pp_dpm_*` clock tables are plain file reads — deliberately not
+  `amd-smi` (whose multi-query SMU access correlates with the wedge
+  documented in the amdgpu-stuck-watchdog README). The `temp1_input`
+  canary rules inherited from strata: when it fails, every GPU field
+  of that card is omitted (a dead SMU costs one blocked read, not
+  eight). Only vendor `0x1002` cards are watched.
+- `sys_linux.go` — CPU utilization from `/proc/stat` deltas, package
+  temperature from the coretemp/k10temp hwmon sensors, RAM from
+  `/proc/meminfo`, NVMe throughput from `/proc/diskstats` sector
+  deltas paired with the hwmon `nvme` composite temperature by
+  controller (`nvme0n1` → `nvme0`).
+- `sys_windows.go` — CPU utilization from `GetSystemTimes` deltas,
+  RAM from `GlobalMemoryStatusEx`, NVMe drive list from the DOS device
+  namespace and throughput from `IOCTL_DISK_PERFORMANCE` deltas (the
+  perfmon disk counters). The IOCTL needs an elevated process; when
+  unprivileged, drives are still listed with the throughput fields
+  omitted. CPU temperature and NVMe temperatures are deliberately not
+  attempted on Windows ("omit where unavailable").
+- `gpu_nvml_stub.go` / `gpu_amd_stub.go` — the other platforms' nil
+  backends. Linux + NVIDIA is a deliberate future extension point
+  (NVML via purego, or the nvidia-smi subprocess).
+
+**Logging** (`writer.go`): when `logDir` is configured, each sample is
+one JSONL line in `monitor-YYYY-MM-DD.jsonl` (one file per calendar
+day, so the daily/weekly windows map onto the newest file and the last
+seven files), `Sync`ed after every line (the log is written on the
+assumption it will be read after a hard reset). The model manager's
+new `Options.OnEvent` callback (fired on load, unload, swap and crash
+exit) writes `model_loaded`/`model_unloaded` records into the same
+stream and keeps the samples' `model` field current (model key or
+`"idle"`). At every midnight roll, files older than `retentionDays`
+(default 7) are deleted.
+
+**Aggregation** (`stats.go`): `combine` reduces samples into one
+sample-shaped result — every numeric field independently averaged or
+maximized over the samples where it is present (absent everywhere →
+stays absent); GPUs are paired by `Index`, NVMe devices by `Name`
+(across samples, so devices appearing/disappearing keep their own
+rows). It is implemented by reflection over the sample structs, so
+new fields participate automatically. Log files are decoded with an
+mtime/size cache keyed per file, keeping repeated endpoint polls off
+the disk.
+
+Hardware tests are opt-in (`LLAMA_SWAPPY_E2E=1` env var): the NVML
+and Windows/proc backends run against the real machine, the AMD sysfs
+backend has fake-sysfs unit tests (Linux only) plus a real-hardware
+e2e, and everything else (config validation, writer rotation and
+retention with a fake clock, aggregation, endpoint shapes, manager
+event wiring) is covered by hermetic unit tests.
+
 ## Config
 
-YAML with exactly three top-level keys (see `example/llama-swap-config.yaml`):
+YAML with four top-level keys (see `example/llama-swap-config.yaml`):
 
 - `globalTTL` — idle seconds before unload
 - `startPort` — single port reused by whichever model is active; `${PORT}`
   in each model's `cmd` and `proxy` URL is substituted with it
 - `models` — map of model key -> `{name, cmd, proxy, maxTokens?}`
+- `monitor` — optional `{enabled, logDir?, interval?, retentionDays?}`
+  hardware monitoring section (see above)
 
-Validation is in `config.Validate`.
+Validation is in `config.Validate` (a disabled monitor section is
+always valid).
 
 ## Package layout
 
@@ -203,6 +291,10 @@ Validation is in `config.Validate`.
 - `cmd/version.go` — version constant (`Version`)
 - `internal/config` — YAML load/validate
 - `internal/inspect` — model metadata parsing from run scripts
-- `internal/model` — model lifecycle (start, readiness, idle, stop)
-- `internal/proxy` — OpenAI listener + reverse proxy + info/unload endpoints
+- `internal/model` — model lifecycle (start, readiness, idle, stop;
+  `Options.OnEvent` lifecycle callback for the monitor)
+- `internal/monitor` — optional hardware heartbeat: platform backends
+  (NVML/sysfs), JSONL writer with daily rotation and retention,
+  sample aggregation, endpoint status
+- `internal/proxy` — OpenAI listener + reverse proxy + info/unload/monitor endpoints
 - `internal/version` — application version constant

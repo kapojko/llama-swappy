@@ -3,8 +3,10 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,11 +26,33 @@ type Model struct {
 	MaxTokens int `yaml:"maxTokens,omitempty"`
 }
 
+// MonitorConfig is the optional hardware monitoring section (the
+// `monitor` key). It is fully opt-in: when it is absent or Enabled is
+// false, the application performs no hardware access at all.
+//
+// Fields:
+//   - Enabled: turns monitoring on; false by default
+//   - LogDir: optional directory for JSONL logs (one file per day,
+//     monitor-YYYY-MM-DD.jsonl). Empty means monitoring runs and the
+//     /llama-swappy/monitor endpoint serves live data, but nothing is
+//     written to disk.
+//   - Interval: sampling interval as a Go duration string ("5s");
+//     empty means 5s
+//   - RetentionDays: how many days of log files to keep; 0 means 7
+type MonitorConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	LogDir        string `yaml:"logDir,omitempty"`
+	Interval      string `yaml:"interval,omitempty"`
+	RetentionDays int    `yaml:"retentionDays,omitempty"`
+}
+
 // Config is the application configuration.
 type Config struct {
 	GlobalTTL int64            `yaml:"globalTTL"`
 	StartPort int              `yaml:"startPort"`
 	Models    map[string]Model `yaml:"models"`
+	// Monitor is nil when the config has no monitor section at all.
+	Monitor *MonitorConfig `yaml:"monitor,omitempty"`
 }
 
 // Load reads and validates the YAML config at path.
@@ -71,6 +95,33 @@ func (c *Config) Validate() error {
 		if m.MaxTokens < 0 {
 			return fmt.Errorf("model %q: maxTokens must be >= 0, got %d", key, m.MaxTokens)
 		}
+	}
+	return c.validateMonitor()
+}
+
+// validateMonitor checks the optional monitor section. A disabled or
+// absent section is always valid: it must never keep the app from
+// starting. An enabled one gets the same sanity treatment as the rest
+// of the config, so a typo is reported at startup instead of being
+// silently ignored by the sampler.
+func (c *Config) validateMonitor() error {
+	if c.Monitor == nil || !c.Monitor.Enabled {
+		return nil
+	}
+	if c.Monitor.Interval != "" {
+		d, err := time.ParseDuration(c.Monitor.Interval)
+		if err != nil {
+			return fmt.Errorf("monitor: interval must be a duration like 5s, got %q", c.Monitor.Interval)
+		}
+		if d < time.Second {
+			return fmt.Errorf("monitor: interval must be >= 1s, got %s", d)
+		}
+	}
+	if c.Monitor.RetentionDays < 0 {
+		return fmt.Errorf("monitor: retentionDays must be >= 0, got %d", c.Monitor.RetentionDays)
+	}
+	if c.Monitor.LogDir != "" && !filepath.IsAbs(c.Monitor.LogDir) {
+		return fmt.Errorf("monitor: logDir must be an absolute path, got %q", c.Monitor.LogDir)
 	}
 	return nil
 }
