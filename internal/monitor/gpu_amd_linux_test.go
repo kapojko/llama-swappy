@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -98,6 +99,43 @@ func TestAMDCardCanaryOmitsEverything(t *testing.T) {
 	s := c.sample()
 	if s.TempC != nil || s.UtilPct != nil || s.PowerW != nil {
 		t.Errorf("sample = %+v, want all GPU fields omitted", s)
+	}
+}
+
+func TestAMDCardName(t *testing.T) {
+	dev := fakeAMDTree(t)
+	amd := filepath.Join(dev, "card0", "device")
+	// The fake tree carries a product_name; it wins.
+	if n := amdCardName(amd, 0, nil); n != "AMD Radeon RX 7800 XT" {
+		t.Errorf("name = %q, want the driver product name", n)
+	}
+	write := func(dir, name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// No product name: the pci.ids database, then the cardN [id]
+	// fallback — deterministic regardless of the host's own pci.ids.
+	write(amd, "product_name", "")
+	db := map[string]string{"747e": "Navi 32 [Radeon RX 7700 XT / 7800 XT]"}
+	if n := amdCardName(amd, 0, db); n != "Navi 32 [Radeon RX 7700 XT / 7800 XT]" {
+		t.Errorf("name = %q, want the pci.ids entry", n)
+	}
+	if n := amdCardName(amd, 0, nil); n != "card0 [747e]" {
+		t.Errorf("name = %q, want the cardN [pci id] fallback", n)
+	}
+	// The database parser itself: vendor section, subsystem lines,
+	// comments, other vendors.
+	parsed := parsePCIIDs(strings.NewReader("# comment\n\n1002  AMD\n\t747e  Navi 32 [Radeon RX 7700 XT / 7800 XT]\n\t\t747e  subsystem noise\n1234  other\n\t0001  x\n"), "1002")
+	if got := parsed["747e"]; got != "Navi 32 [Radeon RX 7700 XT / 7800 XT]" {
+		t.Errorf("pci.ids lookup = %q", got)
+	}
+	if _, ok := parsed["0001"]; ok {
+		t.Error("device of another vendor leaked into the map")
+	}
+	if parsed := parsePCIIDs(strings.NewReader("1002  AMD\n"), "9999"); parsed != nil {
+		t.Errorf("parsePCIIDs(unknown vendor) = %v, want nil", parsed)
 	}
 }
 

@@ -3,13 +3,16 @@
 package monitor
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // AMD GPU backend for Linux, ported from strata-monitor.sh. The
@@ -67,7 +70,7 @@ func newAMDGPUs(log *slog.Logger) *amdGPUs {
 			index:  index,
 			device: dev,
 			hwmon:  hw,
-			name:   amdCardName(dev, index),
+			name:   amdCardName(dev, index, amdDeviceNames()),
 		})
 	}
 	if len(g.cards) == 0 {
@@ -93,17 +96,91 @@ func firstHwmonWithCanary(dev string) string {
 	return ""
 }
 
-// amdCardName prefers the driver's product name (kernel 5.13+);
-// older kernels fall back to a "cardN" label with the PCI id.
-func amdCardName(dev string, index int) string {
+// amdCardName resolves the card's marketing name, best effort:
+// the driver's product name (kernel 5.13+), then the system
+// pci.ids database by PCI device id, then a "cardN" label with the
+// PCI id.
+func amdCardName(dev string, index int, names map[string]string) string {
 	if n := readTrim(filepath.Join(dev, "product_name")); n != "" {
 		return strings.TrimSpace(n)
 	}
 	pci := readTrim(filepath.Join(dev, "device"))
+	id := strings.TrimPrefix(pci, "0x")
+	if n := names[id]; n != "" {
+		return n
+	}
 	if pci != "" {
-		return fmt.Sprintf("card%d [%s]", index, strings.TrimPrefix(pci, "0x"))
+		return fmt.Sprintf("card%d [%s]", index, id)
 	}
 	return fmt.Sprintf("card%d", index)
+}
+
+// pciIDPaths are the locations distros package the pci.ids database
+// at, in try order.
+var pciIDPaths = []string{
+	"/usr/share/misc/pci.ids",  // Debian, Ubuntu (hwdata symlinks here)
+	"/usr/share/hwdata/pci.ids", // Fedora, RHEL
+}
+
+var (
+	amdNamesOnce sync.Once
+	amdNames     map[string]string
+)
+
+// amdDeviceNames returns the AMD (vendor 0x1002) device names from
+// the system pci.ids database, or nil when none is installed. The
+// file is parsed once per process.
+func amdDeviceNames() map[string]string {
+	amdNamesOnce.Do(func() {
+		for _, p := range pciIDPaths {
+			f, err := os.Open(p)
+			if err != nil {
+				continue
+			}
+			amdNames = parsePCIIDs(f, "1002")
+			f.Close()
+			if amdNames != nil {
+				return
+			}
+		}
+	})
+	return amdNames
+}
+// parsePCIIDs extracts one vendor's device names from a pci.ids
+// database:
+//
+//	1002  Advanced Micro Devices, Inc. [AMD/ATI]
+//		747e  Navi 32 [Radeon RX 7700 XT / 7800 XT]
+//		747e  Subsystem name     (double-tab: skipped)
+//	0800  next vendor...
+//
+// Only the wanted vendor's single-tab device lines are kept. Returns
+// nil when the vendor is not in the database.
+func parsePCIIDs(r io.Reader, vendor string) map[string]string {
+	var names map[string]string
+	inVendor := false
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		line := sc.Text()
+		switch {
+		case line == "" || strings.HasPrefix(line, "#"):
+			// blank or comment
+		case strings.HasPrefix(line, "\t\t"):
+			// subsystem entry of the current device
+		case strings.HasPrefix(line, "\t"):
+			if inVendor {
+				if id, name, ok := strings.Cut(line[1:], "  "); ok {
+					if names == nil {
+						names = make(map[string]string)
+					}
+					names[id] = name
+				}
+			}
+		default:
+			inVendor = strings.HasPrefix(line, vendor+"  ")
+		}
+	}
+	return names
 }
 
 func (g *amdGPUs) sample() []GPUSample {
