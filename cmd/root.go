@@ -18,6 +18,7 @@ import (
 	"llama-swappy/internal/inspect"
 	"llama-swappy/internal/model"
 	"llama-swappy/internal/monitor"
+	"llama-swappy/internal/poweroff"
 	"llama-swappy/internal/proxy"
 )
 
@@ -100,9 +101,41 @@ func run(ctx context.Context, cfgPath, listen string) error {
 		defer mon.Stop()
 		mon.Start()
 	}
-	mgr := model.New(cfg, model.Options{Logger: log, Out: os.Stdout, OnEvent: mon.ModelEvent})
+	// The poweroff counter is fully optional: when the config has no
+	// enabled poweroff section, poweroff.New returns nil and no
+	// shutdown is ever attempted. An enabled section without a command
+	// on a non-Linux platform is a startup error (like a bad config).
+	po, err := poweroff.New(cfg.Poweroff, log)
+	if err != nil {
+		return fmt.Errorf("poweroff: %w", err)
+	}
+	if po != nil {
+		defer po.Close()
+		// The executed/failed poweroff command is also written into
+		// the monitor's JSONL log (no-op when monitoring or its log
+		// dir is disabled).
+		po.SetAction(mon.PoweroffAction)
+		log.Info("idle poweroff enabled", "idleSeconds", cfg.Poweroff.IdleSeconds, "command", po.Command())
+	}
+	// The manager's lifecycle events feed the monitor log and the
+	// poweroff counter. OnEvent runs with the manager's lock held, so
+	// the handlers must not block or call back into the manager.
+	onEvent := func(action, key string) {
+		mon.ModelEvent(action, key)
+		switch action {
+		case model.EventLoaded:
+			po.OnLoaded()
+		case model.EventUnloaded:
+			po.OnUnloaded()
+		}
+	}
+	mgr := model.New(cfg, model.Options{Logger: log, Out: os.Stdout, OnEvent: onEvent})
 	defer mgr.Close()
-	server := proxy.New(cfg, mgr, log, infos, mon)
+	server := proxy.New(cfg, mgr, log, infos, mon, po)
+
+	// The app start is the first application-side record of the
+	// monitor's JSONL log (no-op when monitoring is disabled).
+	mon.AppStarted(Version)
 
 	httpSrv := &http.Server{Addr: listen, Handler: server}
 	errCh := make(chan error, 1)

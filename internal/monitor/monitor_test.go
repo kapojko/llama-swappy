@@ -169,6 +169,46 @@ func TestMonitorModelEvents(t *testing.T) {
 func TestMonitorNilReceiver(t *testing.T) {
 	var m *Monitor
 	m.ModelEvent(model.EventLoaded, "x") // must not panic
+	m.AppStarted("1.10")
+	m.PoweroffAction(true, "cmd", "")
+}
+
+func TestMonitorAppStartedAndPoweroffAction(t *testing.T) {
+	m, dir := newTestMonitor(t, time.Hour) // no periodic samples needed
+	m.AppStarted("1.10")
+	m.PoweroffAction(true, "/usr/bin/systemctl poweroff", "")
+	m.PoweroffAction(false, "/usr/bin/systemctl poweroff", "exit status 1: Access denied")
+
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("log dir entries = %v, want one day file", entries)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("log has %d lines, want 3", len(lines))
+	}
+	var started AppStarted
+	if err := json.Unmarshal([]byte(lines[0]), &started); err != nil {
+		t.Fatal(err)
+	}
+	if started.Type != AppStartedType || started.Version != "1.10" {
+		t.Errorf("record = %+v, want app_started 1.10", started)
+	}
+	var ok PoweroffAction
+	if err := json.Unmarshal([]byte(lines[1]), &ok); err != nil {
+		t.Fatal(err)
+	}
+	if ok.Type != PoweroffInitiatedType || ok.Command != "/usr/bin/systemctl poweroff" || ok.Error != "" {
+		t.Errorf("record = %+v, want poweroff_initiated without error", ok)
+	}
+	var failed PoweroffAction
+	if err := json.Unmarshal([]byte(lines[2]), &failed); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Type != PoweroffFailedType || failed.Error != "exit status 1: Access denied" {
+		t.Errorf("record = %+v, want poweroff_failed with the error", failed)
+	}
 }
 
 func TestMonitorNewDisabled(t *testing.T) {

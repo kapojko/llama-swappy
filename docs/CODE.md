@@ -42,6 +42,55 @@ model that just finished a response is not unloaded immediately after. A
 single request that runs longer than the TTL can still be unloaded
 mid-stream, since the timer is only refreshed when a response completes.
 
+## Idle poweroff (optional)
+
+The `poweroff` config section (absent or `enabled: false` by default)
+starts an idle poweroff counter in `internal/poweroff`. It is driven by
+the manager's existing `Options.OnEvent` lifecycle callback, which
+`cmd/run` multiplexes to the monitor log and the counter
+(`loaded` -> `OnLoaded`, `unloaded` -> `OnUnloaded`):
+
+- **Arming.** The countdown starts only after the first model load and
+  its subsequent unload: `OnLoaded` arms the counter (and cancels any
+  in-flight countdown — the system is in use again), `OnUnloaded`
+  (re)starts the full `idleSeconds` countdown only when armed. An app
+  that served no model yet never counts toward a poweroff.
+- **Safety check.** One `time.AfterFunc` per countdown; at expiry the
+  platform safety check runs (outside the counter's lock). On Linux it
+  scans `/proc/*/comm` for `sshd` / `sshd: <user>` / `screen` / `tmux`
+  processes; any hit restarts the full countdown and records the reason
+  as `note` (visible in `/llama-swappy/info` and the stderr log). Off
+  Linux the check always passes (an explicit command there is trusted
+  as-is).
+- **Execution.** A safe check marks the counter `initiated` and runs
+  the command asynchronously (whitespace split with double quotes
+  honored via the model package's `SplitCommandLine`, no shell, 30s
+  WaitDelay). The command is expected to return promptly (`systemctl
+  poweroff` initiates the shutdown and exits 0). A failed run sets the
+  state to `failed` with the error and **stops counting permanently**
+  (until the next application start); a success leaves it `initiated`.
+  Both outcomes are logged to stderr and, through the counter's
+  `onAction` callback, written to the monitor JSONL log
+  (`poweroff_initiated` / `poweroff_failed`).
+- **States.** `waiting` (enabled, not armed yet), `counting`,
+  `initiated`, `failed`; `Status()` reports them plus `secondsLeft`
+  (counting) and the note/error, for the `/llama-swappy/info` payload.
+  A nil `*Poweroff` is a no-op for every method, so wiring is the same
+  with the feature off.
+- The command resolves as: explicit `poweroff.command` as-is on any
+  platform; otherwise the Linux default `/usr/bin/systemctl poweroff`,
+  and an enabled section without a command on other platforms is a
+  startup error (like a bad config). `idleSeconds` has no default and
+  must be > 0 when enabled (config validation).
+
+The normal `go test` suite covers the state machine hermetically
+(fake checker/exec, small durations). E2E tests
+(`internal/poweroff/e2e_linux_test.go`, Linux only, skipped unless
+`LLAMA_SWAPPY_E2E=1`) exercise the real `/proc` scan with a tmux
+session started and killed by the test, and the full real scenario with
+a reduced 5s timer and the real poweroff command — destructive: the
+machine/WSL VM goes down (on WSL2 the Windows host is unaffected).
+
 ## Process model
 
 - `Handle` interface in `internal/model` decouples process
@@ -127,7 +176,12 @@ endpoint itself (never proxied to a model; any other method gets 405):
 - `GET /llama-swappy/info` — JSON with the app `version`, the currently
   loaded model (`key`, `name`, `secondsToUnload` — remaining idle time
   from the same clock the unload monitor uses; `null` when nothing is
-  loaded) and every configured model (`key`, `name`, `input` —
+  loaded), the poweroff state (`poweroff` object — always present, so
+  clients can tell "disabled" from an older server: `enabled`,
+  `idleSeconds`, `status` — `disabled` / `waiting` / `counting` /
+  `initiated` / `failed` — `secondsLeft` while counting, `note` with
+  the last blocked poweroff reason, `error` when the command
+  failed) and every configured model (`key`, `name`, `input` —
   `["text"]`, plus `"image"` when the run script declares an image
   reader — plus derived fields; `contextSize` is
   the per-request context, `slots` the parallel slot count, both
@@ -248,8 +302,13 @@ assumption it will be read after a hard reset). The model manager's
 new `Options.OnEvent` callback (fired on load, unload, swap and crash
 exit) writes `model_loaded`/`model_unloaded` records into the same
 stream and keeps the samples' `model` field current (model key or
-`"idle"`). At every midnight roll, files older than `retentionDays`
-(default 7) are deleted.
+`"idle"`). The monitor also writes one `app_started` record (with the
+version, written at startup via `Monitor.AppStarted`) and one
+`poweroff_initiated` / `poweroff_failed` record per executed/failed
+poweroff command (via `Monitor.PoweroffAction`, wired from the
+poweroff counter's action callback); all of these are no-ops when no
+logDir is configured. At every midnight roll, files older than
+`retentionDays` (default 7) are deleted.
 
 **Aggregation** (`stats.go`): `combine` reduces samples into one
 sample-shaped result — every numeric field independently averaged or
@@ -270,7 +329,7 @@ event wiring) is covered by hermetic unit tests.
 
 ## Config
 
-YAML with four top-level keys (see `example/llama-swap-config.yaml`):
+YAML with five top-level keys (see `example/llama-swap-config.yaml`):
 
 - `globalTTL` — idle seconds before unload
 - `startPort` — single port reused by whichever model is active; `${PORT}`
@@ -278,9 +337,13 @@ YAML with four top-level keys (see `example/llama-swap-config.yaml`):
 - `models` — map of model key -> `{name, cmd, proxy, maxTokens?}`
 - `monitor` — optional `{enabled, logDir?, interval?, retentionDays?}`
   hardware monitoring section (see above)
+- `poweroff` — optional `{enabled, idleSeconds, command?}` idle poweroff
+  section (see above); enabled requires `idleSeconds > 0` (no default),
+  and an enabled section without `command` on non-Linux platforms is a
+  startup error
 
-Validation is in `config.Validate` (a disabled monitor section is
-always valid).
+Validation is in `config.Validate` (a disabled monitor or poweroff
+section is always valid).
 
 ## Package layout
 
@@ -292,9 +355,15 @@ always valid).
 - `internal/config` — YAML load/validate
 - `internal/inspect` — model metadata parsing from run scripts
 - `internal/model` — model lifecycle (start, readiness, idle, stop;
-  `Options.OnEvent` lifecycle callback for the monitor)
+  `Options.OnEvent` lifecycle callback, multiplexed by the CLI to the
+  monitor and the poweroff counter; `SplitCommandLine` is also used by
+  the poweroff command runner)
 - `internal/monitor` — optional hardware heartbeat: platform backends
   (NVML/sysfs), JSONL writer with daily rotation and retention,
-  sample aggregation, endpoint status
+  sample aggregation, endpoint status, application-side records
+  (model events, app start, poweroff actions)
+- `internal/poweroff` — optional idle poweroff: event-driven countdown,
+  platform safety check (`/proc` scan on Linux), poweroff command
+  execution, status for `/llama-swappy/info`
 - `internal/proxy` — OpenAI listener + reverse proxy + info/unload/monitor endpoints
 - `internal/version` — application version constant

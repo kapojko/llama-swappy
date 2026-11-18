@@ -47,11 +47,17 @@ GET /llama-swappy/info
 
 ```json
 {
-  "version": "1.3",
+  "version": "1.10",
   "current": {
     "key": "qwen3.8-27b",
     "name": "Qwen3.8-27B",
     "secondsToUnload": 843
+  },
+  "poweroff": {
+    "enabled": true,
+    "idleSeconds": 3600,
+    "status": "counting",
+    "secondsLeft": 3521
   },
   "models": [
     {
@@ -69,6 +75,11 @@ GET /llama-swappy/info
 
 - `current` is `null` when no model is loaded; `secondsToUnload` is the
   remaining idle time before the model is unloaded.
+- `poweroff` is always present (see "Idle poweroff"): `status` is
+  `disabled` when the feature is off, `waiting`/`counting` while
+  enabled (`secondsLeft` while counting, `note` explains the last
+  blocked poweroff), `initiated` once the poweroff command ran, and
+  `failed` (with `error`) when the command failed and counting stopped.
 - Per-model fields are derived at startup by parsing the model's run
   script (or the `cmd` line itself when there is no wrapper script):
   `contextSize` from `-c`/`--ctx-size` (last uncommented occurrence),
@@ -158,7 +169,55 @@ read/write B/s.
 
 A probe failure never stops the sampler — the affected field is
 omitted for that sample, and a permanently unavailable value is
-logged once, not once per sample.
+logged once, not once per sample. Besides samples and
+`model_loaded`/`model_unloaded`, the JSONL log holds one `app_started`
+record (with the version) and one `poweroff_initiated` /
+`poweroff_failed` record per executed/failed poweroff command, when
+the idle poweroff is enabled.
+
+## Idle poweroff (optional)
+
+An optional idle poweroff: after the last loaded model is unloaded and
+no model is loaded for `idleSeconds`, llama-swappy checks that it is
+safe to power off (no active sessions) and powers the system off. It
+is fully opt-in:
+without an enabled `poweroff` section the system is never powered off.
+
+```yaml
+poweroff:
+  enabled: true
+  idleSeconds: 3600          # required when enabled; no default
+  command: "/usr/bin/systemctl poweroff"  # default on Linux; required on other platforms
+```
+
+Behavior:
+
+- The countdown starts only after the **first model load and its
+  subsequent unload**: an app that served no model yet never counts
+toward a poweroff. Every later unload (idle TTL, swap-out, manual,
+  crash) restarts the full countdown; any new model load cancels it.
+- When the countdown expires, the safety check runs **once**: on Linux
+  the system is not safe to power off while any `sshd` (ssh session),
+  `screen` or `tmux` process exists. An unsafe system restarts the
+  full countdown (and the reason is visible as `note` in
+  `/llama-swappy/info` and in the stderr log); on other platforms the
+  check always passes (an explicit `command` there is trusted as-is).
+- A safe system runs the `command` **as the llama-swappy user**
+  (split on whitespace, double
+  quotes honored, no shell). A successful run is logged and the state
+  becomes `initiated` (the machine goes down; the log line
+  `poweroff: command executed, system should be shutting down` is the
+  last one). A failed run **stops counting permanently** until the
+  next application start, with the error in the stderr log,
+  `/llama-swappy/info` (`status: "failed"` + `error`) and the monitor
+  JSONL log. Note: on a systemd machine, a plain (non-root) user's
+  `systemctl poweroff` is polkit-gated and fails with
+  `Interactive authentication required` unless authorized (run
+  llama-swappy as root, use a `sudo`-style command, or add a polkit
+  rule) — the failure is then safely recorded, not retried.
+
+All poweroff activity is also in the normal stderr log (journalctl)
+alongside the startup, load/unload and proxy lines.
 
 ## Native llama-server endpoints (`/llama/...`)
 
@@ -202,6 +261,12 @@ monitor:
   interval: 5s
   retentionDays: 7
 
+# Optional idle poweroff (see "Idle poweroff")
+poweroff:
+  enabled: true
+  idleSeconds: 3600
+  # command: "/usr/bin/systemctl poweroff"   # default on Linux
+
 models:
   qwen3.8-27b:
     name: "Qwen3.8-27B"
@@ -210,8 +275,8 @@ models:
 ```
 
 `globalTTL`, `startPort`, `models` (with per-model `name`, `cmd`,
-`proxy` and optional `maxTokens`) and the optional `monitor` section
-are supported. `${PORT}` in `proxy` is
+`proxy` and optional `maxTokens`), the optional `monitor` section and
+the optional `poweroff` section are supported. `${PORT}` in `proxy` is
 always replaced with
 `startPort` — the single active model always uses that port.
 
@@ -271,6 +336,10 @@ image reader when the real flag lives in the runner's own config, e.g.
   is stopped (on Unix: SIGTERM to its whole process group, escalating to
   SIGKILL after a 10s grace; on Windows: the whole process tree is
   terminated via a job object).
+- **Idle poweroff**: with an enabled `poweroff` section, `idleSeconds`
+  after the last unload (and no model loaded) the system is checked for
+  active sessions (Linux: sshd/screen/tmux) and powered off — see
+  "Idle poweroff".
 - **Crash recovery / failed-start retry**: if the model process exits
   unexpectedly (e.g. segfault), or a start fails (spawn error, exit or
   timeout during readiness), the model is cleared and auto-restarted
@@ -327,3 +396,15 @@ unless `LLAMA_SWAPPY_E2E=1` is set, so the normal suite stays hermetic:
 # Windows (NVIDIA/NVML, CPU/RAM, NVMe) or Linux/WSL (proc, sysfs):
 LLAMA_SWAPPY_E2E=1 go test ./internal/monitor -run E2E -v
 ```
+
+The poweroff e2e tests are the same (real `/proc` safety check with a
+tmux session; the full flow with a reduced 5s timer and the **real
+poweroff command** — run it deliberately, the machine/WSL VM goes down
+and no `PASS` line comes back):
+
+```bash
+# Linux/WSL only:
+LLAMA_SWAPPY_E2E=1 go test ./internal/poweroff -run E2E -v
+```
+
+On WSL2 the shutdown affects the WSL VM only, never the Windows host.

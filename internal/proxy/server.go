@@ -16,6 +16,7 @@ import (
 	"llama-swappy/internal/inspect"
 	"llama-swappy/internal/model"
 	"llama-swappy/internal/monitor"
+	"llama-swappy/internal/poweroff"
 	"llama-swappy/internal/version"
 )
 
@@ -67,21 +68,24 @@ type Server struct {
 	log   *slog.Logger
 	infos map[string]inspect.Info
 	mon   *monitor.Monitor
+	po    *poweroff.Poweroff
 }
 
 // New creates the proxy Server. infos holds the metadata parsed at
 // startup from each model's run script; keys whose scripts could not be
 // parsed are absent and are reported without those fields. mon is the
 // optional hardware monitor; nil means monitoring is disabled in the
-// config and the monitor endpoint reports that.
-func New(cfg *config.Config, mgr *model.Manager, log *slog.Logger, infos map[string]inspect.Info, mon *monitor.Monitor) *Server {
+// config and the monitor endpoint reports that. po is the optional idle
+// poweroff counter; nil means the feature is disabled and /info
+// reports that.
+func New(cfg *config.Config, mgr *model.Manager, log *slog.Logger, infos map[string]inspect.Info, mon *monitor.Monitor, po *poweroff.Poweroff) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	if infos == nil {
 		infos = map[string]inspect.Info{}
 	}
-	return &Server{cfg: cfg, mgr: mgr, log: log, infos: infos, mon: mon}
+	return &Server{cfg: cfg, mgr: mgr, log: log, infos: infos, mon: mon, po: po}
 }
 
 type apiError struct {
@@ -211,11 +215,27 @@ type currentModel struct {
 	SecondsToUnload int    `json:"secondsToUnload"`
 }
 
+// poweroffInfo is the idle poweroff section of the info response. It
+// is always present so a client can tell "poweroff disabled" from an
+// older server without the field; status is "disabled" when the
+// feature is off. secondsLeft is set while counting; note explains the
+// last blocked poweroff; error is set when the poweroff command
+// failed (status "failed").
+type poweroffInfo struct {
+	Enabled     bool   `json:"enabled"`
+	IdleSeconds int    `json:"idleSeconds,omitempty"`
+	Status      string `json:"status"`
+	SecondsLeft int    `json:"secondsLeft,omitempty"`
+	Note        string `json:"note,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
 // infoResponse is the payload of GET InfoPath.
 type infoResponse struct {
-	Version string        `json:"version"`
-	Current *currentModel `json:"current"`
-	Models  []modelInfo   `json:"models"`
+	Version  string        `json:"version"`
+	Current  *currentModel `json:"current"`
+	Models   []modelInfo   `json:"models"`
+	Poweroff poweroffInfo  `json:"poweroff"`
 }
 
 // modelInput reports the modalities a model accepts: text, plus image
@@ -255,6 +275,18 @@ func (s *Server) serveInfo(w http.ResponseWriter) {
 			Name:            s.cfg.Models[key].Name,
 			SecondsToUnload: int(remaining.Seconds()),
 		}
+	}
+	if st := s.po.Status(); st.Enabled {
+		resp.Poweroff = poweroffInfo{
+			Enabled:     true,
+			IdleSeconds: st.IdleSeconds,
+			Status:      st.State,
+			SecondsLeft: st.SecondsLeft,
+			Note:        st.Note,
+			Error:       st.Error,
+		}
+	} else {
+		resp.Poweroff = poweroffInfo{Enabled: false, Status: "disabled"}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)

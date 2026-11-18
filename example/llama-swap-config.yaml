@@ -18,6 +18,18 @@ startPort: 12390
 #  interval: 5s
 #  retentionDays: 7
 
+# Optional idle poweroff: after the last loaded model has been unloaded,
+# wait `idleSeconds` without any model loaded, check that it is safe to
+# power off (on Linux: no ssh sessions, screen or tmux instances) and
+# run the poweroff command. Counting starts only after the first model
+# load and its subsequent unload; an unsafe system restarts the full
+# countdown; a failed command stops counting permanently (until the next
+# start). Absent or enabled: false means the system is never powered off.
+#poweroff:
+#  enabled: true
+#  idleSeconds: 3600
+#  # command: /usr/bin/systemctl poweroff   # default on Linux; required elsewhere
+
 models:
   qwen3.8-27b:
     name: "Qwen3.8-27B"

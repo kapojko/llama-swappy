@@ -46,6 +46,27 @@ type MonitorConfig struct {
 	RetentionDays int    `yaml:"retentionDays,omitempty"`
 }
 
+// PoweroffConfig is the optional idle poweroff section (the
+// `poweroff` key). Disabled by default: when it is absent or Enabled
+// is false, the application never attempts to power the system off.
+//
+// Fields:
+//   - Enabled: turns the feature on; false by default
+//   - IdleSeconds: how long the system must stay without a loaded
+//     model before the health check runs and the poweroff command
+//     executes. Required when enabled. Counting starts only after the
+//     first model load and its subsequent unload, restarts from the
+//     beginning on every unload, and is cancelled by any new model
+//     load; an unhealthy system restarts the full countdown.
+//   - Command: the poweroff command line (split on whitespace, double
+//     quotes honored, no shell). Optional on Linux, where it defaults
+//     to /usr/bin/systemctl poweroff; required on other platforms.
+type PoweroffConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	IdleSeconds int    `yaml:"idleSeconds,omitempty"`
+	Command     string `yaml:"command,omitempty"`
+}
+
 // Config is the application configuration.
 type Config struct {
 	GlobalTTL int64            `yaml:"globalTTL"`
@@ -53,6 +74,8 @@ type Config struct {
 	Models    map[string]Model `yaml:"models"`
 	// Monitor is nil when the config has no monitor section at all.
 	Monitor *MonitorConfig `yaml:"monitor,omitempty"`
+	// Poweroff is nil when the config has no poweroff section at all.
+	Poweroff *PoweroffConfig `yaml:"poweroff,omitempty"`
 }
 
 // Load reads and validates the YAML config at path.
@@ -96,7 +119,25 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("model %q: maxTokens must be >= 0, got %d", key, m.MaxTokens)
 		}
 	}
-	return c.validateMonitor()
+	if err := c.validateMonitor(); err != nil {
+		return err
+	}
+	return c.validatePoweroff()
+}
+
+// validatePoweroff checks the optional poweroff section. An absent or
+// disabled section is always valid: it must never keep the app from
+// starting. An enabled one requires idleSeconds (there is no default);
+// the command default / platform check lives in poweroff.New, where
+// the runtime platform is resolved once.
+func (c *Config) validatePoweroff() error {
+	if c.Poweroff == nil || !c.Poweroff.Enabled {
+		return nil
+	}
+	if c.Poweroff.IdleSeconds <= 0 {
+		return fmt.Errorf("poweroff: idleSeconds is required and must be > 0, got %d", c.Poweroff.IdleSeconds)
+	}
+	return nil
 }
 
 // validateMonitor checks the optional monitor section. A disabled or

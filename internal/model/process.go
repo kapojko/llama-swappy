@@ -25,7 +25,7 @@ type ProcessStarter struct{}
 
 func (ProcessStarter) Start(cmd string, out io.Writer) (Handle, error) {
 	cmd = strings.TrimSpace(cmd)
-	args, err := splitCommandLine(cmd)
+	args, err := SplitCommandLine(cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -66,9 +66,9 @@ func (ProcessStarter) Start(cmd string, out io.Writer) (Handle, error) {
 	return h, nil
 }
 
-// splitCommandLine splits a command line on whitespace, treating double
+// SplitCommandLine splits a command line on whitespace, treating double
 // quoted segments as a single argument (quotes stripped).
-func splitCommandLine(s string) ([]string, error) {
+func SplitCommandLine(s string) ([]string, error) {
 	var args []string
 	var cur strings.Builder
 	inQuote := false

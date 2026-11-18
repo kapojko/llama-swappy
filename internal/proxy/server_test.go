@@ -16,6 +16,7 @@ import (
 	"llama-swappy/internal/config"
 	"llama-swappy/internal/inspect"
 	"llama-swappy/internal/model"
+	"llama-swappy/internal/poweroff"
 	"llama-swappy/internal/version"
 )
 
@@ -95,6 +96,12 @@ func backend(t *testing.T) *httptest.Server {
 }
 
 func newTestServer(t *testing.T, backend *httptest.Server, ttl time.Duration, infos map[string]inspect.Info) (*Server, *model.Manager, *fakeStarter) {
+	return newTestServerFull(t, backend, ttl, infos, nil)
+}
+
+// newTestServerFull is newTestServer with an explicit poweroff counter
+// (nil = feature disabled).
+func newTestServerFull(t *testing.T, backend *httptest.Server, ttl time.Duration, infos map[string]inspect.Info, po *poweroff.Poweroff) (*Server, *model.Manager, *fakeStarter) {
 	t.Helper()
 	u, err := url.Parse(backend.URL)
 	if err != nil {
@@ -123,7 +130,7 @@ func newTestServer(t *testing.T, backend *httptest.Server, ttl time.Duration, in
 		PollInterval: 20 * time.Millisecond,
 	})
 	t.Cleanup(mgr.Close)
-	return New(cfg, mgr, log, infos, nil), mgr, fs
+	return New(cfg, mgr, log, infos, nil, po), mgr, fs
 }
 
 func getJSON(t *testing.T, url string) (int, map[string]any) {
@@ -402,6 +409,10 @@ func TestInfoEndpointNoModelLoaded(t *testing.T) {
 	if body["current"] != nil {
 		t.Errorf("current = %v, want null", body["current"])
 	}
+	// The poweroff section is always present; disabled by default.
+	if pof, _ := body["poweroff"].(map[string]any); pof == nil || pof["enabled"] != false || pof["status"] != "disabled" {
+		t.Errorf("poweroff = %v, want {enabled:false status:disabled}", body["poweroff"])
+	}
 	models, ok := body["models"].([]any)
 	if !ok || len(models) != 2 {
 		t.Fatalf("models = %v, want 2 entries", body["models"])
@@ -470,6 +481,46 @@ func TestInfoEndpointCurrentModel(t *testing.T) {
 	_, body = getJSON(t, ts.URL+InfoPath)
 	if body["current"] != nil {
 		t.Errorf("current = %v, want null after StopAll", body["current"])
+	}
+}
+
+func TestInfoEndpointPoweroff(t *testing.T) {
+	be := backend(t)
+	defer be.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	po, err := poweroff.New(&config.PoweroffConfig{Enabled: true, IdleSeconds: 3600, Command: "true"}, log)
+	if err != nil {
+		t.Fatalf("poweroff.New: %v", err)
+	}
+	defer po.Close()
+	srv, mgr, _ := newTestServerFull(t, be, time.Minute, nil, po)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// Before any load: enabled and waiting.
+	_, body := getJSON(t, ts.URL+InfoPath)
+	pof, _ := body["poweroff"].(map[string]any)
+	if pof == nil || pof["enabled"] != true || pof["status"] != poweroff.StateWaiting {
+		t.Fatalf("poweroff = %v, want enabled/%s", pof, poweroff.StateWaiting)
+	}
+	if pof["idleSeconds"] != float64(3600) {
+		t.Errorf("idleSeconds = %v, want 3600", pof["idleSeconds"])
+	}
+
+	// Load + unload: counting with a deadline.
+	if _, err := mgr.EnsureModel("m1"); err != nil {
+		t.Fatalf("EnsureModel: %v", err)
+	}
+	po.OnLoaded()
+	mgr.StopAll()
+	po.OnUnloaded()
+	_, body = getJSON(t, ts.URL+InfoPath)
+	pof, _ = body["poweroff"].(map[string]any)
+	if pof == nil || pof["status"] != poweroff.StateCounting {
+		t.Fatalf("poweroff = %v, want %s", pof, poweroff.StateCounting)
+	}
+	if secs, _ := pof["secondsLeft"].(float64); secs <= 0 || secs > 3600 {
+		t.Errorf("secondsLeft = %v, want in (0, 3600]", pof["secondsLeft"])
 	}
 }
 

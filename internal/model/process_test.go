@@ -17,16 +17,16 @@ func TestSplitCommandLine(t *testing.T) {
 		{"", nil},
 	}
 	for _, tc := range cases {
-		got, err := splitCommandLine(tc.in)
+		got, err := SplitCommandLine(tc.in)
 		if err != nil {
-			t.Fatalf("splitCommandLine(%q): %v", tc.in, err)
+			t.Fatalf("SplitCommandLine(%q): %v", tc.in, err)
 		}
 		if !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("splitCommandLine(%q) = %v, want %v", tc.in, got, tc.want)
+			t.Errorf("SplitCommandLine(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
 
-	if _, err := splitCommandLine(`cmd /c "unbalanced`); err == nil {
+	if _, err := SplitCommandLine(`cmd /c "unbalanced`); err == nil {
 		t.Fatal("expected error for unbalanced quote")
 	}
 }

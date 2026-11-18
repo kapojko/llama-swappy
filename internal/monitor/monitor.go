@@ -218,6 +218,39 @@ func (m *Monitor) ModelEvent(action, key string) {
 	}
 }
 
+// AppStarted writes the application-start record into the JSONL log.
+// It is a no-op when the monitor is disabled (nil receiver) or no
+// logDir is configured.
+func (m *Monitor) AppStarted(version string) {
+	if m == nil || m.writer == nil {
+		return
+	}
+	if err := m.writer.write(AppStarted{Type: AppStartedType, TS: time.Now().UTC(), Version: version}); err != nil {
+		m.log.Warn("monitor: app start not logged", "err", err)
+	}
+}
+
+// PoweroffAction writes a poweroff action record into the JSONL log:
+// initiated=true when the command was executed, false (with failure
+// text) when it failed and counting stopped. No-op when the monitor
+// is disabled or no logDir is configured.
+func (m *Monitor) PoweroffAction(initiated bool, command, failure string) {
+	if m == nil || m.writer == nil {
+		return
+	}
+	typ := PoweroffFailedType
+	if initiated {
+		typ = PoweroffInitiatedType
+	}
+	rec := PoweroffAction{Type: typ, TS: time.Now().UTC(), Command: command}
+	if failure != "" {
+		rec.Error = failure
+	}
+	if err := m.writer.write(rec); err != nil {
+		m.log.Warn("monitor: poweroff action not logged", "err", err)
+	}
+}
+
 // Status is the payload of the /llama-swappy/monitor endpoint. Now is
 // the newest sample; AvgMinute averages the in-memory ring; MaxDay
 // and MaxWeek come from the log files (omitted when logging is not

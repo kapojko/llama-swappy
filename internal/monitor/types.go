@@ -95,6 +95,16 @@ type Sample struct {
 	Model string     `json:"model"`
 }
 
+// AppStartedType marks the application start record in the JSONL log.
+const AppStartedType RecordType = "app_started"
+
+// PoweroffInitiatedType and PoweroffFailedType mark the records
+// written when the idle poweroff command is executed or fails.
+const (
+	PoweroffInitiatedType RecordType = "poweroff_initiated"
+	PoweroffFailedType    RecordType = "poweroff_failed"
+)
+
 // ModelEvent is an application-side record in the JSONL log: a model
 // was loaded or unloaded (swap, idle TTL, crash, shutdown or manual
 // unload — the log does not distinguish, the timestamps line up with
@@ -103,4 +113,21 @@ type ModelEvent struct {
 	Type  string    `json:"type"` // ModelLoadedType | ModelUnloadedType
 	TS    time.Time `json:"ts"`
 	Model string    `json:"model"`
+}
+
+// AppStarted is the record written once when the application starts.
+type AppStarted struct {
+	Type    RecordType `json:"type"`
+	TS      time.Time  `json:"ts"`
+	Version string     `json:"version"`
+}
+
+// PoweroffAction is the record written when the idle poweroff command
+// is executed (poweroff_initiated) or fails (poweroff_failed, with the
+// error; counting stops after a failure).
+type PoweroffAction struct {
+	Type    RecordType `json:"type"` // PoweroffInitiatedType | PoweroffFailedType
+	TS      time.Time  `json:"ts"`
+	Command string     `json:"command"`
+	Error   string     `json:"error,omitempty"`
 }
