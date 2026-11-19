@@ -358,6 +358,46 @@ YAML with five top-level keys (see `example/llama-swap-config.yaml`):
   section (see above); enabled requires `idleSeconds > 0` (no default),
   and an enabled section without `command` on non-Linux platforms is a
   startup error
+- `backup` — optional `{enabled, dir, machineName?}` config backup section
+  (see Config backup below); enabled requires an absolute `dir`
+
+## Config backup (optional)
+
+The `backup` section (absent or `enabled: false` by default) mirrors the
+live configuration into a per-machine directory, so a user can keep, for
+example, a git repository holding the configs of many machines and inspect
+another machine's launch setup from anywhere. It runs **once at startup**
+(`internal/backup`, wired from `cmd/root.go` right after the config is
+loaded) and is strictly best-effort: any failure is logged as a warning and
+never prevents the app from starting.
+
+**Sources.** `backup.SourcesForConfig` derives the files that make up the
+current configuration: the config file itself (the `--config` path) plus
+every launch script referenced by a model's `cmd` — the wrapper-script
+tokens (`.sh`/`.bash`/`.ps1`/`.bat`/`.cmd`, found by the shared
+`inspect.ScriptTokens` scan, the same scan `inspect.Inspect` uses). Relative
+script paths are resolved against the config file's directory. Each file is
+stored under its base name; if two files would share a base name the first
+wins and the second is skipped with a warning. A source whose file is missing
+on disk is skipped with a warning (its stale backup copy, if any, is then
+treated as outdated and removed).
+
+**Machine directory.** The files are kept under `<dir>/<machineName>/`.
+`machineName` is optional; when omitted it is derived from the host name and
+OS (`os.Hostname` + `runtime.GOOS`, e.g. `workpc_linux`), which works on both
+Windows and Linux. The name is sanitized of path-unsafe characters before use.
+
+**Reconcile.** On startup the machine directory is reconciled against the
+current files:
+- a current file absent from the backup is copied in ("added"),
+- a current file whose backup copy differs is overwritten ("updated"),
+- a backup file no longer in the source set (and not `CHANGELOG.txt`) is
+  deleted ("removed").
+
+If anything changed, a dated entry listing the changes is appended to
+`CHANGELOG.txt` in the machine directory and the update is logged to the
+application log; if nothing changed it is a no-op. `CHANGELOG.txt` is never
+itself treated as a config file or removed as outdated.
 
 Validation is in `config.Validate` (a disabled monitor or poweroff
 section is always valid).
@@ -369,8 +409,12 @@ section is always valid).
   `go build`; optional output path argument)
 - `cmd/root.go` — cobra CLI: `--config` (required), `--listen`, `--version`
 - `cmd/version.go` — version constant (`Version`)
-- `internal/config` — YAML load/validate
+- `internal/config` — YAML load/validate (incl. the optional `backup` section)
 - `internal/inspect` — model metadata parsing from run scripts
+  (`ScriptTokens` also exposes the wrapper-script paths referenced by a cmd,
+  used by config backup)
+- `internal/backup` — optional per-machine config backup (config file +
+  referenced launch scripts), reconciled at startup with a CHANGELOG
 - `internal/model` — model lifecycle (start, readiness, idle, stop;
   `Options.OnEvent` lifecycle callback, multiplexed by the CLI to the
   monitor and the poweroff counter; `SplitCommandLine` is also used by

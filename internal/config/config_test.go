@@ -242,6 +242,70 @@ poweroff:
 	}
 }
 
+func TestValidateBackup(t *testing.T) {
+	validCfg := func() *Config {
+		return &Config{
+			GlobalTTL: 900,
+			StartPort: 12390,
+			Models: map[string]Model{
+				"m1": {Name: "M", Cmd: "c", Proxy: "http://127.0.0.1:${PORT}"},
+			},
+		}
+	}
+	// A disabled or absent section is always valid, whatever it says.
+	for _, b := range []*BackupConfig{nil, {Enabled: false, Dir: ""}, {Enabled: false, Dir: "relative"}} {
+		c := validCfg()
+		c.Backup = b
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate() with backup %+v = %v, want nil", b, err)
+		}
+	}
+	absDir := filepath.Join(t.TempDir(), "backups")
+	cases := []struct {
+		name    string
+		b       *BackupConfig
+		wantErr string
+	}{
+		{"missing dir", &BackupConfig{Enabled: true}, "dir is required"},
+		{"relative dir", &BackupConfig{Enabled: true, Dir: "backups"}, "absolute path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg()
+			c.Backup = tc.b
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Validate() = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+	// Enabled with an absolute dir is valid, with or without a machine name.
+	for _, b := range []*BackupConfig{{Enabled: true, Dir: absDir}, {Enabled: true, Dir: absDir, MachineName: "workpc"}} {
+		c := validCfg()
+		c.Backup = b
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate() with backup %+v = %v, want nil", b, err)
+		}
+	}
+}
+
+func TestLoadBackupSection(t *testing.T) {
+	absDir := filepath.Join(t.TempDir(), "backups")
+	yaml := validYAML + `
+backup:
+  enabled: true
+  dir: ` + absDir + `
+  machineName: workpc
+`
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Backup == nil || !c.Backup.Enabled || c.Backup.Dir != absDir || c.Backup.MachineName != "workpc" {
+		t.Fatalf("Backup = %+v", c.Backup)
+	}
+}
+
 func TestLoadMaxTokensOverride(t *testing.T) {
 	yaml := strings.Replace(validYAML, "    proxy: http://127.0.0.1:${PORT}\n  m2:",
 		"    proxy: http://127.0.0.1:${PORT}\n    maxTokens: 4096\n  m2:", 1)

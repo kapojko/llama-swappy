@@ -77,6 +77,27 @@ func isScript(arg string) bool {
 	return false
 }
 
+// ScriptTokens returns the wrapper-script tokens of a model's command
+// line, in order, after ${PORT} substitution and without resolving them
+// to files. It is the same scan Inspect uses to decide whether to read
+// a run script, exposed so other callers (config backup) can locate the
+// referenced launch scripts. It returns nil when the command has no
+// script token or cannot be split.
+func ScriptTokens(cmd string, port int) []string {
+	line := strings.ReplaceAll(cmd, "${PORT}", strconv.Itoa(port))
+	args, err := splitLine(line)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, a := range args {
+		if isScript(a) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // Inspect derives model metadata from the model's configured command
 // line. If a token in cmd is a wrapper script (.sh, .bash, .ps1, .bat
 // or .cmd) the script file is read and parsed; otherwise the command

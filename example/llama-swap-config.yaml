@@ -54,3 +54,14 @@ models:
     name: "Swift 1.5 Qwen3.8-27B"
     cmd: env PORT=${PORT} /home/yury/run_swift-1.5-qwen3.8-27b.sh
     proxy: http://127.0.0.1:${PORT}
+
+# --- Optional: config backup (off by default) ---------------------------------
+# Mirrors the config file and every referenced launch script into
+# <dir>/<machineName>/ at startup, so you can keep (e.g. in a git
+# repository) the live configs of many machines side by side. Changed
+# files are updated, new files added, files no longer referenced are
+# deleted, and each update appends a dated entry to CHANGELOG.txt.
+#backup:
+#  enabled: true
+#  dir: D:\Configs\llama-swappy    # mandatory when enabled; absolute path
+#  machineName: workpc             # optional; derived from host name + OS if omitted

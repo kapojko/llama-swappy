@@ -46,6 +46,24 @@ type MonitorConfig struct {
 	RetentionDays int    `yaml:"retentionDays,omitempty"`
 }
 
+// BackupConfig is the optional config backup section (the `backup`
+// key). Disabled by default: when it is absent or Enabled is false the
+// application never touches the backup directory.
+//
+// Fields:
+//   - Enabled: turns config backup on; false by default
+//   - Dir: mandatory when enabled. Absolute path to the backup root
+//     (e.g. a git repository holding per-machine config trees). The
+//     files for this machine are kept under Dir/<machineName>/.
+//   - MachineName: optional. The sub-directory name identifying this
+//     machine. When empty it is derived from the host name and the OS
+//     (e.g. "workpc_linux").
+type BackupConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	Dir         string `yaml:"dir,omitempty"`
+	MachineName string `yaml:"machineName,omitempty"`
+}
+
 // PoweroffConfig is the optional idle poweroff section (the
 // `poweroff` key). Disabled by default: when it is absent or Enabled
 // is false, the application never attempts to power the system off.
@@ -76,6 +94,8 @@ type Config struct {
 	Monitor *MonitorConfig `yaml:"monitor,omitempty"`
 	// Poweroff is nil when the config has no poweroff section at all.
 	Poweroff *PoweroffConfig `yaml:"poweroff,omitempty"`
+	// Backup is nil when the config has no backup section at all.
+	Backup *BackupConfig `yaml:"backup,omitempty"`
 }
 
 // Load reads and validates the YAML config at path.
@@ -122,7 +142,10 @@ func (c *Config) Validate() error {
 	if err := c.validateMonitor(); err != nil {
 		return err
 	}
-	return c.validatePoweroff()
+	if err := c.validatePoweroff(); err != nil {
+		return err
+	}
+	return c.validateBackup()
 }
 
 // validatePoweroff checks the optional poweroff section. An absent or
@@ -136,6 +159,23 @@ func (c *Config) validatePoweroff() error {
 	}
 	if c.Poweroff.IdleSeconds <= 0 {
 		return fmt.Errorf("poweroff: idleSeconds is required and must be > 0, got %d", c.Poweroff.IdleSeconds)
+	}
+	return nil
+}
+
+// validateBackup checks the optional backup section. A disabled or
+// absent section is always valid: it must never keep the app from
+// starting. An enabled one requires an absolute backup directory; the
+// machine name is optional (derived at runtime when omitted).
+func (c *Config) validateBackup() error {
+	if c.Backup == nil || !c.Backup.Enabled {
+		return nil
+	}
+	if c.Backup.Dir == "" {
+		return fmt.Errorf("backup: dir is required when enabled")
+	}
+	if !filepath.IsAbs(c.Backup.Dir) {
+		return fmt.Errorf("backup: dir must be an absolute path, got %q", c.Backup.Dir)
 	}
 	return nil
 }

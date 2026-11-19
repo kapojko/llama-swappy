@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"llama-swappy/internal/backup"
 	"llama-swappy/internal/config"
 	"llama-swappy/internal/inspect"
 	"llama-swappy/internal/model"
@@ -48,6 +49,40 @@ func init() {
 // Execute runs the CLI.
 func Execute() error {
 	return rootCmd.Execute()
+}
+
+// syncConfigBackup mirrors the current configuration (the config file
+// and every referenced launch script) into the per-machine backup
+// directory. It is best-effort: every problem is logged as a warning
+// and never fails startup.
+func syncConfigBackup(log *slog.Logger, cfg *config.Config, cfgPath string) {
+	machineName := cfg.Backup.MachineName
+	if machineName == "" {
+		machineName = backup.DefaultMachineName()
+	}
+	sources, warns := backup.SourcesForConfig(cfg, cfgPath)
+	for _, w := range warns {
+		log.Warn("config backup: "+w)
+	}
+	// Drop sources whose current file is missing on disk (e.g. a script
+	// that was deleted but not yet removed from the config): it cannot be
+	// backed up, and its stale copy (if any) is treated as outdated.
+	kept := make([]backup.Source, 0, len(sources))
+	for _, s := range sources {
+		if _, err := os.Stat(s.Src); err != nil {
+			log.Warn("config backup: source not found, skipping", "file", s.Src)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	err := backup.Sync(backup.Options{
+		Dir:         cfg.Backup.Dir,
+		MachineName: machineName,
+		Sources:     kept,
+	}, log)
+	if err != nil {
+		log.Warn("config backup: sync failed", "err", err)
+	}
 }
 
 func run(ctx context.Context, cfgPath, listen string) error {
@@ -88,6 +123,13 @@ func run(ctx context.Context, cfgPath, listen string) error {
 			attrs = append(attrs, "vision", *info.Vision)
 		}
 		log.Info("model metadata", attrs...)
+	}
+	// Config backup is fully optional and runs once at startup: it
+	// mirrors the config file and every referenced launch script into
+	// <dir>/<machineName>/. A failure never prevents the app from
+	// starting — it is logged and ignored.
+	if cfg.Backup != nil && cfg.Backup.Enabled {
+		syncConfigBackup(log, cfg, cfgPath)
 	}
 	// The monitor is fully optional: when the config has no enabled
 	// monitor section, monitor.New returns nil and no hardware is
