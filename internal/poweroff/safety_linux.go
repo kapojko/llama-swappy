@@ -3,6 +3,7 @@
 package poweroff
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strconv"
@@ -20,7 +21,9 @@ var (
 
 // safeToPowerOff scans /proc for processes that indicate an active
 // human session: the system is not safe to power off while any sshd,
-// screen or tmux process exists.
+// screen or tmux process exists, except the system sshd listener
+// ("sshd: /usr/sbin/sshd -D [listener] ..."), which runs even when
+// no user session is open.
 func safeToPowerOff() (bool, string) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -40,9 +43,15 @@ func safeToPowerOff() (bool, string) {
 			continue
 		}
 		name := strings.TrimSpace(string(comm))
-		if forbiddenExact[name] || hasForbiddenPrefix(name) {
-			found = append(found, fmt.Sprintf("%d:%s", pid, name))
+		if !isSessionProcess(name) {
+			continue
 		}
+		// A bare "sshd" comm with -D in the command line is the
+		// system listener in daemon mode, not a user session.
+		if name == "sshd" && hasDaemonFlag(e.Name()) {
+			continue
+		}
+		found = append(found, fmt.Sprintf("%d:%s", pid, name))
 	}
 	if len(found) == 0 {
 		return true, ""
@@ -57,4 +66,22 @@ func hasForbiddenPrefix(name string) bool {
 		}
 	}
 	return false
+}
+
+// isSessionProcess reports whether a /proc/<pid>/comm value marks an
+// active human session. Titled sshd processes that are the system
+// listener ("[listener]" in the title) are excluded: they exist
+// regardless of user sessions.
+func isSessionProcess(name string) bool {
+	if forbiddenExact[name] {
+		return true
+	}
+	return hasForbiddenPrefix(name) && !strings.Contains(name, "[listener]")
+}
+
+// hasDaemonFlag reports whether /proc/<pid>/cmdline contains the -D
+// flag (sshd "do not detach" mode, i.e. the listener).
+func hasDaemonFlag(pid string) bool {
+	cmdline, err := os.ReadFile("/proc/" + pid + "/cmdline")
+	return err == nil && bytes.Contains(cmdline, []byte("-D"))
 }

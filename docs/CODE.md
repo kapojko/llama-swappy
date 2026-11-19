@@ -58,7 +58,9 @@ the manager's existing `Options.OnEvent` lifecycle callback, which
 - **Safety check.** One `time.AfterFunc` per countdown; at expiry the
   platform safety check runs (outside the counter's lock). On Linux it
   scans `/proc/*/comm` for `sshd` / `sshd: <user>` / `screen` / `tmux`
-  processes; any hit restarts the full countdown and records the reason
+  processes, excluding the system sshd listener (its title contains
+  `[listener]`; a bare `sshd` comm with `-D` in its cmdline is also
+  skipped); any other hit restarts the full countdown and records the reason
   as `note` (visible in `/llama-swappy/info` and the stderr log). Off
   Linux the check always passes (an explicit command there is trusted
   as-is).

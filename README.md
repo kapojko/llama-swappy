@@ -47,7 +47,7 @@ GET /llama-swappy/info
 
 ```json
 {
-  "version": "1.11",
+  "version": "1.12",
   "current": {
     "key": "qwen3.8-27b",
     "name": "Qwen3.8-27B",
