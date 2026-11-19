@@ -47,7 +47,7 @@ GET /llama-swappy/info
 
 ```json
 {
-  "version": "1.12",
+  "version": "1.13",
   "current": {
     "key": "qwen3.8-27b",
     "name": "Qwen3.8-27B",
@@ -219,6 +219,40 @@ toward a poweroff. Every later unload (idle TTL, swap-out, manual,
 All poweroff activity is also in the normal stderr log (journalctl)
 alongside the startup, load/unload and proxy lines.
 
+## Config backup (optional)
+
+An optional config backup: at startup llama-swappy mirrors the config
+file and every launch script referenced by a model's `cmd` into a
+per-machine directory, so you can keep (e.g. in a git repository) the
+live configs of many machines and inspect another machine's launch setup
+from anywhere. It is fully opt-in: without an enabled `backup` section
+nothing is written and the backup directory is never touched.
+
+```yaml
+backup:
+  enabled: true
+  dir: D:\Configs\llama-swappy   # required when enabled; absolute path
+  machineName: workpc            # optional; derived from host name + OS if omitted
+```
+
+- The files are kept under `<dir>/<machineName>/`; both directories are
+  created if missing. `machineName` is optional — when omitted it is
+  derived from the host name and OS (e.g. `workpc_linux`), on both
+  Windows and Linux.
+- The backed-up set is the config file itself plus every wrapper launch
+  script referenced by a model's `cmd` (the `.sh`/`.bash`/`.ps1`/`.bat`/
+  `.cmd` token); relative script paths are resolved against the config
+  file's directory. Each file is stored under its base name.
+- On startup the machine directory is reconciled against the current
+  files: new files are copied in, changed files are overwritten, and files
+  no longer referenced are deleted. If anything changed, a dated entry
+  listing the changes is appended to `CHANGELOG.txt` in the machine
+  directory and the update is logged to the stderr log; if nothing
+  changed, nothing happens.
+- Backup is best-effort: a failure (missing or unreadable file, unwritable
+  directory, ...) is logged as a warning and never prevents the app from
+  starting.
+
 ## Native llama-server endpoints (`/llama/...`)
 
 A small set of native llama-server endpoints is exposed under the
@@ -267,6 +301,12 @@ poweroff:
   idleSeconds: 3600
   # command: "/usr/bin/systemctl poweroff"   # default on Linux
 
+# Optional per-machine config backup (see "Config backup")
+backup:
+  enabled: true
+  dir: /home/you/configs/llama-swappy   # required; absolute path
+  # machineName: workpc                 # optional; derived if omitted
+
 models:
   qwen3.8-27b:
     name: "Qwen3.8-27B"
@@ -275,9 +315,9 @@ models:
 ```
 
 `globalTTL`, `startPort`, `models` (with per-model `name`, `cmd`,
-`proxy` and optional `maxTokens`), the optional `monitor` section and
-the optional `poweroff` section are supported. `${PORT}` in `proxy` is
-always replaced with
+`proxy` and optional `maxTokens`), the optional `monitor` section, the
+optional `poweroff` section and the optional `backup` section are
+supported. `${PORT}` in `proxy` is always replaced with
 `startPort` — the single active model always uses that port.
 
 ### Run scripts on Unix (bash)
