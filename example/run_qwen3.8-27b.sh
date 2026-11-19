@@ -4,6 +4,10 @@
 MODEL_PATH="$HOME/models/ISTA-DASLab--Qwen3.8-27B-GSQ-RCO-GGUF/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf"
 SERVER_BIN="$HOME/llama.cpp/build/bin/llama-server"
 
+# Port: first positional argument (like the -Port parameter of the PowerShell
+# scripts), else the PORT environment variable, else the default.
+PORT="${1:-${PORT:-12380}}"
+
 # Check if model exists
 if [ ! -f "$MODEL_PATH" ]; then
     echo "Error: Model not found at $MODEL_PATH"
@@ -18,7 +22,7 @@ SERVER_ARGS=(
     --no-mmproj
 
     --host 0.0.0.0
-    --port ${PORT:-12380}
+    --port "$PORT"
 
     --n-gpu-layers all
     -kvo
@@ -61,5 +65,7 @@ SERVER_ARGS=(
     #-lv 4
 )
 
-# Run the server
-$SERVER_BIN "${SERVER_ARGS[@]}"
+# Run the server. exec matters: it replaces this shell with the server, so the
+# server itself is llama-swappy's direct child and its signals reach it directly
+# instead of a wrapper that dies first (see README, "Run scripts on Unix").
+exec "$SERVER_BIN" "${SERVER_ARGS[@]}"

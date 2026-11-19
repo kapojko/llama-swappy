@@ -4,6 +4,10 @@
 MODEL_PATH="$HOME/models/NANI-Nithin--K2-Horizon-7B-GGUF/K2-Horizon-7B-Q8_0.gguf"
 SERVER_BIN="$HOME/llama.cpp-mbzuai-ifm/build/bin/llama-server"
 
+# Port: first positional argument (like the -Port parameter of the PowerShell
+# scripts), else the PORT environment variable, else the default.
+PORT="${1:-${PORT:-12380}}"
+
 # Check if model exists
 if [ ! -f "$MODEL_PATH" ]; then
     echo "Error: Model not found at $MODEL_PATH"
@@ -23,7 +27,7 @@ echo "Starting llama.cpp HIP server..."
 SERVER_ARGS=(
     -m "$MODEL_PATH"
     --host 0.0.0.0
-    --port ${PORT:-12380}
+    --port "$PORT"
 
     --n-gpu-layers all
     -fa on
@@ -51,5 +55,7 @@ SERVER_ARGS=(
     --threads $(nproc)
 )
 
-# Run the server
-$SERVER_BIN "${SERVER_ARGS[@]}"
+# Run the server. exec matters: it replaces this shell with the server, so the
+# server itself is llama-swappy's direct child and its signals reach it directly
+# instead of a wrapper that dies first (see README, "Run scripts on Unix").
+exec "$SERVER_BIN" "${SERVER_ARGS[@]}"

@@ -47,7 +47,7 @@ GET /llama-swappy/info
 
 ```json
 {
-  "version": "1.10",
+  "version": "1.11",
   "current": {
     "key": "qwen3.8-27b",
     "name": "Qwen3.8-27B",
@@ -280,6 +280,65 @@ the optional `poweroff` section are supported. `${PORT}` in `proxy` is
 always replaced with
 `startPort` — the single active model always uses that port.
 
+### Run scripts on Unix (bash)
+
+On Unix `cmd` runs the script directly (no shell). The port reaches
+llama-server either through the environment or as an argument — both work:
+
+```yaml
+cmd: env PORT=${PORT} /home/you/run_qwen3.8-27b.sh   # port in the environment
+cmd: /home/you/run_qwen3.8-27b.sh ${PORT}           # port as an argument
+```
+
+```bash
+# first positional argument, else the PORT environment variable, else a default
+PORT="${1:-${PORT:-12380}}"
+...
+# last line of the script
+exec "$SERVER_BIN" "${SERVER_ARGS[@]}"
+```
+
+Use `exec` for the final command. Without it the shell stays
+llama-swappy's direct child and the server is a *grandchild*: on stop the
+shell dies at the first SIGTERM while the server it spawned keeps running,
+so llama-swappy has to escalate on the whole process group instead of on the
+process it started, and a wrapper that outlives its own signal is also
+reported as `model exited unexpectedly` because the crash watcher only sees
+the shell. With `exec` the server replaces the shell and becomes exactly the
+process llama-swappy started, watched and signals.
+
+Templates: `example/run_qwen3.8-27b.sh` (llama-server, one slot),
+`example/run_ornith_1.5_9B.sh`, `example/run_ornith_1.5_9B_np4.sh`
+(parallel slots) and `example/run_k2-horizon-7b.sh`.
+
+### Running under systemd (Linux)
+
+llama-swappy starts *and stops* the model itself, so systemd must not signal
+it too. With the default `KillMode=control-group`, `systemctl stop/restart`
+sends SIGTERM to every process of the unit — including llama-server — while
+llama-swappy is stopping the same process. llama-server then takes two
+interrupts, and llama.cpp's second-interrupt path calls `exit()` from the
+signal handler while the GPU teardown is still running, which can deadlock
+the process; the unit stays in `final-sigterm` until `TimeoutStopSec`
+expires and is reported as `Failed with result 'timeout'`.
+
+```ini
+[Service]
+Type=simple
+User=<you>
+ExecStart=/path/to/llama-swappy --config /path/to/llama-swap-config.yaml --listen 127.0.0.1:12380
+Restart=on-failure
+RestartSec=10
+# Only llama-swappy is signalled; it stops the model itself (SIGTERM to the
+# model's process group, SIGKILL after a 10s grace).
+KillMode=mixed
+# Bounds the worst case: SIGKILL whatever is left at the timeout.
+TimeoutStopSec=30
+```
+
+After changing a unit file run `systemctl daemon-reload` — a plain
+`restart` does not re-read it.
+
 ### Run scripts on Windows (PowerShell)
 
 `cmd` is executed as a plain command line without a shell. On Windows use a
@@ -352,21 +411,24 @@ image reader when the real flag lives in the runner's own config, e.g.
   starts the model and begins a fresh failure streak.
 - **Output**: the model process's stdout/stderr go to llama-swappy's
   stdout; llama-swappy's own logs go to stderr.
-- **Shutdown**: Ctrl+C stops the server and unloads any loaded model.
+- **Shutdown**: Ctrl+C (or SIGTERM) stops the server and unloads any loaded
+  model — SIGTERM to the model's process group, SIGKILL after a 10s grace.
 
 ## Limitations
 
-- On Unix, unloading sends SIGTERM to the model's whole process group
-  (the wrapper script and everything it spawns), waiting 10s before
-  escalating to SIGKILL — so a plain wrapper script is stopped
-  completely, and the server gets its clean-exit path on SIGTERM. On
-  Windows the whole tree is terminated through a kill-on-close job
+- On Unix, unloading sends SIGTERM to the model's whole process group and
+  then waits for the *group* to drain (10s), not just for the direct child:
+  a wrapper script without `exec` can exit on the first signal while the
+  server it spawned is still finishing (or hanging in) its own shutdown, and
+  only the group covers that case. Anything still alive after the grace is
+  SIGKILLed, with a bounded (5s) wait for it to disappear — an unkillable
+  process then fails the unload with a warning instead of blocking forever.
+  On Windows the whole tree is terminated through a kill-on-close job
   object: everything the direct child spawns joins the job, and the
   tree also dies if llama-swappy itself exits without unloading. What
   is *not* stopped is a grandchild that deliberately escapes — one that
   leaves the process group (e.g. via `setsid` or daemonizing) on Unix,
   or breaks out of the job (`CREATE_BREAKAWAY_FROM_JOB`) on Windows.
-  The unload wait is bounded (30s), so this cannot hang the process.
 - Requests arrive at the proxy URL, not the model port; port conflicts with
   other services on `startPort` are not detected ahead of time.
 - If an upstream failure happens after the response has already started

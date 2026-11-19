@@ -108,10 +108,25 @@ machine/WSL VM goes down (on WSL2 the Windows host is unaffected).
   wrapper that takes the port as a parameter:
   `powershell -NoProfile -ExecutionPolicy Bypass -File <script>.ps1 -Port ${PORT}`;
   the script declares `param([int]$Port)` (see README and
-  `example/run_qwen3.8-27b.ps1`).
-- Unloading stops the model's whole process group on Unix (SIGTERM,
-  escalating to SIGKILL after a 10s grace), which covers wrapper scripts
-  that spawn the server; on Windows the tree is terminated via a
+  `example/run_qwen3.8-27b.ps1`). On Unix the same shape is a bash script
+  that takes the port either from `${PORT}` or as its first positional
+  argument, and whose **last line is `exec "$SERVER_BIN" ...`**: `exec`
+  replaces the shell, so the server is the process llama-swappy spawned,
+  watches and signals. Without it the shell is the direct child and the
+  server a grandchild — the shell dies on the first SIGTERM while the
+  server keeps running, the crash watcher reports a bogus
+  `model exited unexpectedly` for the shell, and the stop has to rely on
+  the group escalation described below (see README, "Run scripts on Unix").
+- Unloading stops the model's whole process group on Unix: SIGTERM, then a
+  poll of the group (`kill(-pgid, 0)`, every 25ms) until it is empty or
+  `termGrace` (10s) expires, then SIGKILL on the group and a bounded
+  `killGrace` (5s) wait; if the direct child still has not been reaped the
+  call returns an error instead of blocking. Watching the group rather than
+  the direct child is what covers wrapper scripts whose shell exits before
+  the server it started does — and a server that hangs in its own shutdown
+  (e.g. llama.cpp's second-interrupt `exit()` racing GPU teardown) is
+  consequently bounded by the grace instead of living until systemd's
+  `TimeoutStopSec`. On Windows the tree is terminated via a
   kill-on-close job object the child joins while still suspended
   (see README limitations). `Wait` is bounded by `WaitDelay` (30s), so a
     process that keeps the stdout pipe open cannot hang the unload. A
@@ -126,8 +141,8 @@ machine/WSL VM goes down (on WSL2 the Windows host is unaffected).
   calls `exec.Cmd.Wait` and stores the exit error in a buffered channel
   with a mutex-cached result, so `Kill` and `Wait` can both consume the
   exit idempotently without a double-`Wait` race. The platform `Kill`
-  variants send their signal(s), then return the reaper result instead of
-  waiting themselves.
+  variants send their signal(s) themselves (on Unix polling the group until
+  it is gone) and then return the reaper result.
 - The manager starts a `watch` goroutine per active model. It blocks on
   `handle.Wait`; when the process exits and the model is still current,
   the manager logs the unexpected exit (with its exit status), clears the
